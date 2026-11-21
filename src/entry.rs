@@ -9,6 +9,9 @@ pub struct Entry {
     pub id: u64,
     pub preview: String,
     pub kind: Kind,
+    /// What the list shows and what search matches against. The same as
+    /// `preview`, except images get a readable description.
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,11 +39,21 @@ impl Entry {
                 Kind::Text
             }
         });
+        let label = match &kind {
+            Kind::Image {
+                format,
+                width,
+                height,
+                size,
+            } => format!("[image] {format} {width}x{height} · {size}"),
+            Kind::Text | Kind::Url => preview.to_owned(),
+        };
         Some(Self {
             raw: line.to_owned(),
             id,
             preview: preview.to_owned(),
             kind,
+            label,
         })
     }
 }
@@ -106,6 +119,7 @@ mod tests {
                 size: "2 MiB".into(),
             }
         );
+        assert_eq!(e.label, "[image] png 2560x1440 · 2 MiB");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod app;
 mod cliphist;
 mod entry;
+mod search;
 mod ui;
 
 use std::path::PathBuf;

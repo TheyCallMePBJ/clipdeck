@@ -8,4 +8,5 @@ license = "MIT"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.9", features = ["derive"] }
+nucleo-matcher = "0.3.1"
 ratatui = "0.30.2"

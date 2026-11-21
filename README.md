@@ -15,7 +15,7 @@ straight through cliphist.
 
 ## Features (v1)
 
-- **Fuzzy search** across history (fzf-like matching via `nucleo`)
+- **Fuzzy search** across history (fzf-like matching via `nucleo-matcher`)
 - **Preview pane**: full text for text entries, which `cliphist list` cuts
   off, and real image thumbnails via the kitty graphics protocol
 - **Pins**: keep entries at the top; they survive re-copies, trimming and
@@ -113,7 +113,7 @@ clipdeck stores no history of its own, only metadata (currently just pins).
 | Concern         | Crate                       |
 |-----------------|-----------------------------|
 | TUI             | `ratatui` + `crossterm`     |
-| Fuzzy matching  | `nucleo`                    |
+| Fuzzy matching  | `nucleo-matcher`            |
 | Image previews  | `ratatui-image` + `image`   |
 | Watching the DB | `notify`                    |
 | Content hashing | `blake3`                    |
@@ -127,7 +127,7 @@ clipdeck stores no history of its own, only metadata (currently just pins).
 1. **Stub and launch check**: a binary that prints `cliphist list` in a ratatui
    list. Wire up the Hyprland bind and rules, and measure Ghostty startup time.
 2. **Core loop**: navigation, copy-and-exit, delete, re-list after changes.
-3. **Search**: fuzzy filtering with `nucleo`.
+3. **Search**: fuzzy filtering with `nucleo-matcher`.
 4. **Preview pane**: full text first, then image thumbnails and the thumbnail cache.
 5. **Live reload**: watch the DB with `notify`.
 6. **Pins**: hash-keyed pin store and a pinned section at the top.

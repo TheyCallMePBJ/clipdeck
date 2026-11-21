@@ -7,6 +7,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 
 use crate::entry::Entry;
+use crate::search::{Match, Searcher};
 
 /// Where history comes from and where changes go. The real implementation
 /// is `cliphist::Cliphist`; tests use an in-memory fake.
@@ -32,13 +33,27 @@ pub enum Status {
     Error(String),
 }
 
+/// Which keys do what. In `Normal`, letters are commands; in `Search`,
+/// they are typed into the query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Search,
+}
+
 pub struct App<B: Backend> {
     backend: B,
     /// The last result of `backend.list()`. Never edited directly: after any
     /// change, list again so the UI matches what cliphist holds.
     entries: Vec<Entry>,
-    /// Index into `entries`. Always valid when `entries` is non-empty.
+    /// The entries that match `query`, in display order. With an empty
+    /// query this is every entry.
+    matches: Vec<Match>,
+    /// Index into `matches`. Always valid when `matches` is non-empty.
     selected: usize,
+    mode: Mode,
+    query: String,
+    searcher: Searcher,
     status: Option<Status>,
     /// Number of visible list rows, set by the UI each frame. Used for paging.
     page_height: usize,
@@ -53,15 +68,21 @@ pub struct App<B: Backend> {
 impl<B: Backend> App<B> {
     pub fn new(backend: B) -> Result<Self> {
         let entries = backend.list()?;
-        Ok(Self {
+        let mut app = Self {
             backend,
             entries,
+            matches: Vec::new(),
             selected: 0,
+            mode: Mode::Normal,
+            query: String::new(),
+            searcher: Searcher::new(),
             status: None,
             page_height: 10,
             list_state: ListState::default(),
             pending_delete: None,
-        })
+        };
+        app.refilter_from_top();
+        Ok(app)
     }
 
     pub fn backend(&self) -> &B {
@@ -72,27 +93,42 @@ impl<B: Backend> App<B> {
         &self.entries
     }
 
+    pub fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+
     pub fn selected_index(&self) -> usize {
         self.selected
     }
 
     pub fn selected(&self) -> Option<&Entry> {
-        self.entries.get(self.selected)
+        self.matches
+            .get(self.selected)
+            .map(|m| &self.entries[m.index])
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
     }
 
     pub fn status(&self) -> Option<&Status> {
         self.status.as_ref()
     }
 
-    /// Everything the UI needs to draw the list: the entries and the list
-    /// widget's state, with the selection synced.
+    /// Everything the UI needs to draw the list: the entries, which of them
+    /// to show (in order, with highlights), and the list widget's state with
+    /// the selection synced.
     ///
-    /// Returning both from one method lets the caller borrow two fields at
-    /// once. Calling `entries()` and then using `list_state` mutably would
+    /// Returning these from one method lets the caller borrow several fields
+    /// at once. Calling `entries()` and then using `list_state` mutably would
     /// not compile, because `entries()` borrows all of `self`.
-    pub fn list_view(&mut self) -> (&[Entry], &mut ListState) {
+    pub fn list_view(&mut self) -> (&[Entry], &[Match], &mut ListState) {
         self.list_state.select(Some(self.selected));
-        (&self.entries, &mut self.list_state)
+        (&self.entries, &self.matches, &mut self.list_state)
     }
 
     pub fn set_page_height(&mut self, rows: usize) {
@@ -105,37 +141,101 @@ impl<B: Backend> App<B> {
         // pending delete.
         let pending_delete = self.pending_delete.take();
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        if ctrl && key.code == KeyCode::Char('c') {
+            return Action::Quit;
+        }
+        match self.mode {
+            Mode::Normal => self.normal_key(key.code, ctrl, pending_delete),
+            Mode::Search => self.search_key(key, ctrl),
+        }
+    }
+
+    fn normal_key(&mut self, code: KeyCode, ctrl: bool, pending_delete: Option<u64>) -> Action {
         let half_page = (self.page_height / 2).max(1) as isize;
-        let page = self.page_height as isize;
 
         // Arms are tried top to bottom, so the Ctrl combinations must come
         // before the plain letters they share a key with.
-        match key.code {
-            KeyCode::Char('c') if ctrl => return Action::Quit,
+        match code {
             KeyCode::Char('d') if ctrl => self.move_by(half_page),
             KeyCode::Char('u') if ctrl => self.move_by(-half_page),
 
-            KeyCode::Char('q') | KeyCode::Esc => return Action::Quit,
-            KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
-            KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
-            KeyCode::PageDown => self.move_by(page),
-            KeyCode::PageUp => self.move_by(-page),
-            KeyCode::Char('g') | KeyCode::Home => self.selected = 0,
-            KeyCode::Char('G') | KeyCode::End => self.selected = self.last_index(),
-
-            KeyCode::Enter => {
-                if let Some(entry) = self.selected() {
-                    return Action::Copy(entry.clone());
-                }
+            KeyCode::Char('q') => return Action::Quit,
+            // Esc first clears an active filter, and only quits after that.
+            KeyCode::Esc if !self.query.is_empty() => {
+                self.query.clear();
+                self.refilter_keeping_selection();
             }
+            KeyCode::Esc => return Action::Quit,
+            KeyCode::Char('f') | KeyCode::Char('/') => self.mode = Mode::Search,
+            KeyCode::Char('j') => self.move_by(1),
+            KeyCode::Char('k') => self.move_by(-1),
+            KeyCode::Char('g') => self.selected = 0,
+            KeyCode::Char('G') => self.selected = self.last_index(),
+
+            KeyCode::Enter => return self.copy_selected(),
             KeyCode::Char('d') | KeyCode::Delete => self.press_delete(pending_delete),
             KeyCode::Char('r') => match self.reload() {
                 Ok(()) => self.status = Some(Status::Info("reloaded".into())),
                 Err(e) => self.status = Some(Status::Error(format!("{e:#}"))),
             },
-            _ => {}
+            other => self.navigate(other),
         }
         Action::None
+    }
+
+    fn search_key(&mut self, key: KeyEvent, ctrl: bool) -> Action {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            // Leave search mode but keep the filter, so the results can be
+            // browsed with the normal keys (and entries deleted).
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Enter => return self.copy_selected(),
+            KeyCode::Backspace => {
+                if self.query.pop().is_some() {
+                    self.refilter_from_top();
+                } else {
+                    self.mode = Mode::Normal;
+                }
+            }
+            KeyCode::Char('u') if ctrl => {
+                self.query.clear();
+                self.refilter_from_top();
+            }
+            KeyCode::Char('w') if ctrl => {
+                delete_last_word(&mut self.query);
+                self.refilter_from_top();
+            }
+            KeyCode::Char('n') if ctrl => self.move_by(1),
+            KeyCode::Char('p') if ctrl => self.move_by(-1),
+            KeyCode::Char(c) if !ctrl && !alt => {
+                self.query.push(c);
+                self.refilter_from_top();
+            }
+            other => self.navigate(other),
+        }
+        Action::None
+    }
+
+    /// Keys that move the selection the same way in both modes.
+    fn navigate(&mut self, code: KeyCode) {
+        let page = self.page_height as isize;
+        match code {
+            KeyCode::Down => self.move_by(1),
+            KeyCode::Up => self.move_by(-1),
+            KeyCode::PageDown => self.move_by(page),
+            KeyCode::PageUp => self.move_by(-page),
+            KeyCode::Home => self.selected = 0,
+            KeyCode::End => self.selected = self.last_index(),
+            _ => {}
+        }
+    }
+
+    fn copy_selected(&self) -> Action {
+        match self.selected() {
+            Some(entry) => Action::Copy(entry.clone()),
+            None => Action::None,
+        }
     }
 
     /// Moves the selection by `delta` rows, stopping at either end.
@@ -145,20 +245,51 @@ impl<B: Backend> App<B> {
     }
 
     fn last_index(&self) -> usize {
-        self.entries.len().saturating_sub(1)
+        self.matches.len().saturating_sub(1)
     }
 
-    /// Lists again, keeping the same entry selected if it still exists
-    /// (new entries may have appeared above it). Otherwise the selection
-    /// stays at the same position.
-    pub fn reload(&mut self) -> Result<()> {
+    /// Re-runs the search after the query changed, selecting the best match.
+    fn refilter_from_top(&mut self) {
+        self.refilter();
+        self.selected = 0;
+    }
+
+    /// Re-runs the search, keeping the same entry selected if it is still
+    /// shown. Otherwise the selection stays at the same position.
+    fn refilter_keeping_selection(&mut self) {
         let selected_id = self.selected().map(|e| e.id);
-        self.entries = self.backend.list()?;
-        if let Some(index) = selected_id.and_then(|id| self.entries.iter().position(|e| e.id == id))
+        self.refilter();
+        self.reselect(selected_id);
+    }
+
+    fn refilter(&mut self) {
+        // `self.searcher` is borrowed mutably and `self.entries` immutably
+        // at the same time. That's allowed because they are different
+        // fields, accessed directly rather than through methods on `self`.
+        let labels = self.entries.iter().map(|e| e.label.as_str());
+        self.matches = self.searcher.filter(&self.query, labels);
+    }
+
+    /// Selects the entry with this id if it is shown; otherwise keeps the
+    /// current position, clamped to the list.
+    fn reselect(&mut self, id: Option<u64>) {
+        let entries = &self.entries;
+        if let Some(index) =
+            id.and_then(|id| self.matches.iter().position(|m| entries[m.index].id == id))
         {
             self.selected = index;
         }
         self.selected = self.selected.min(self.last_index());
+    }
+
+    /// Lists again and re-applies the current filter, keeping the same
+    /// entry selected if it still exists (new entries may have appeared
+    /// above it).
+    pub fn reload(&mut self) -> Result<()> {
+        let selected_id = self.selected().map(|e| e.id);
+        self.entries = self.backend.list()?;
+        self.refilter();
+        self.reselect(selected_id);
         Ok(())
     }
 
@@ -197,6 +328,14 @@ impl<B: Backend> App<B> {
     }
 }
 
+/// Removes the last word and any spaces after it, like Ctrl+W in a shell.
+fn delete_last_word(query: &mut String) {
+    let trimmed = query.trim_end().len();
+    query.truncate(trimmed);
+    let cut = query.rfind(' ').map_or(0, |i| i + 1);
+    query.truncate(cut);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,17 +366,24 @@ mod tests {
         Entry::parse(&format!("{id}\t{text}")).unwrap()
     }
 
-    /// An app over entries with ids 5, 4, 3, 2, 1 (newest first, like cliphist).
-    fn app() -> App<Fake> {
-        let entries = (1..=5)
-            .rev()
-            .map(|id| entry(id, &format!("e{id}")))
+    fn app_with(texts: &[&str]) -> App<Fake> {
+        // Newest first, like cliphist: the first text gets the highest id.
+        let n = texts.len() as u64;
+        let entries = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| entry(n - i as u64, t))
             .collect();
         App::new(Fake {
             entries,
             fail_delete: false,
         })
         .unwrap()
+    }
+
+    /// An app over entries with ids 5, 4, 3, 2, 1 (newest first, like cliphist).
+    fn app() -> App<Fake> {
+        app_with(&["e5", "e4", "e3", "e2", "e1"])
     }
 
     fn press(app: &mut App<Fake>, code: KeyCode) -> Action {
@@ -248,9 +394,25 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
     }
 
+    fn type_str(app: &mut App<Fake>, s: &str) {
+        for c in s.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
     fn selected_id(app: &App<Fake>) -> u64 {
         app.selected().unwrap().id
     }
+
+    fn shown(app: &mut App<Fake>) -> Vec<String> {
+        let (entries, matches, _) = app.list_view();
+        matches
+            .iter()
+            .map(|m| entries[m.index].label.clone())
+            .collect()
+    }
+
+    // --- navigation -------------------------------------------------------
 
     #[test]
     fn movement_stops_at_both_ends() {
@@ -295,6 +457,8 @@ mod tests {
             Action::Copy(entry(4, "e4"))
         );
     }
+
+    // --- delete -----------------------------------------------------------
 
     #[test]
     fn delete_selects_next_entry() {
@@ -374,6 +538,8 @@ mod tests {
         assert_eq!(app.status(), None);
     }
 
+    // --- reload -----------------------------------------------------------
+
     #[test]
     fn reload_follows_selected_entry_when_new_entries_arrive() {
         let mut app = app();
@@ -386,14 +552,174 @@ mod tests {
 
     #[test]
     fn empty_history_is_harmless() {
-        let mut app = App::new(Fake {
-            entries: vec![],
-            fail_delete: false,
-        })
-        .unwrap();
+        let mut app = app_with(&[]);
         assert_eq!(press(&mut app, KeyCode::Down), Action::None);
         assert_eq!(press(&mut app, KeyCode::Char('d')), Action::None);
         assert_eq!(press(&mut app, KeyCode::Enter), Action::None);
         assert_eq!(app.selected(), None);
+    }
+
+    // --- search -----------------------------------------------------------
+
+    fn history() -> App<Fake> {
+        app_with(&["git push", "hello world", "git pull", "cargo test"])
+    }
+
+    #[test]
+    fn f_starts_search_and_typing_filters() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.mode(), Mode::Search);
+        type_str(&mut app, "git");
+        assert_eq!(app.query(), "git");
+        assert_eq!(shown(&mut app), ["git push", "git pull"]);
+    }
+
+    #[test]
+    fn slash_also_starts_search() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('/'));
+        assert_eq!(app.mode(), Mode::Search);
+    }
+
+    #[test]
+    fn command_letters_are_typed_in_search_mode() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        // q, d, j, f would be commands in normal mode.
+        assert_eq!(press(&mut app, KeyCode::Char('q')), Action::None);
+        type_str(&mut app, "djf");
+        assert_eq!(app.query(), "qdjf");
+        assert_eq!(app.entries().len(), 4);
+    }
+
+    #[test]
+    fn enter_in_search_copies_best_match() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "pull");
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Action::Copy(entry(2, "git pull"))
+        );
+    }
+
+    #[test]
+    fn typing_resets_selection_to_top() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "g");
+        press(&mut app, KeyCode::Down);
+        type_str(&mut app, "i");
+        assert_eq!(app.selected_index(), 0);
+    }
+
+    #[test]
+    fn arrows_and_ctrl_n_p_move_in_search_mode() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Down);
+        ctrl(&mut app, 'n');
+        assert_eq!(app.selected_index(), 2);
+        ctrl(&mut app, 'p');
+        assert_eq!(app.selected_index(), 1);
+    }
+
+    #[test]
+    fn esc_leaves_search_then_clears_filter_then_quits() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "git");
+        press(&mut app, KeyCode::Down); // "git pull"
+
+        // 1st Esc: back to normal mode, filter still applied.
+        assert_eq!(press(&mut app, KeyCode::Esc), Action::None);
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.match_count(), 2);
+
+        // 2nd Esc: filter cleared, still on the same entry.
+        assert_eq!(press(&mut app, KeyCode::Esc), Action::None);
+        assert_eq!(app.query(), "");
+        assert_eq!(app.match_count(), 4);
+        assert_eq!(app.selected().unwrap().label, "git pull");
+
+        // 3rd Esc: quit.
+        assert_eq!(press(&mut app, KeyCode::Esc), Action::Quit);
+    }
+
+    #[test]
+    fn backspace_edits_query_and_exits_when_empty() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "gx");
+        assert_eq!(app.match_count(), 0);
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.query(), "g");
+        assert_eq!(app.match_count(), 3);
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.mode(), Mode::Search);
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn ctrl_w_and_ctrl_u_edit_query() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "git pu");
+        ctrl(&mut app, 'w');
+        assert_eq!(app.query(), "git ");
+        ctrl(&mut app, 'u');
+        assert_eq!(app.query(), "");
+        assert_eq!(app.mode(), Mode::Search);
+    }
+
+    #[test]
+    fn delete_inside_filtered_view_keeps_filter() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "git");
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.query(), "git");
+        assert_eq!(shown(&mut app), ["git pull"]);
+        assert_eq!(app.entries().len(), 3);
+    }
+
+    #[test]
+    fn reload_reapplies_filter() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "git");
+        app.backend.entries.insert(0, entry(9, "git stash"));
+        app.reload().unwrap();
+        assert_eq!(shown(&mut app).len(), 3);
+    }
+
+    #[test]
+    fn no_matches_is_harmless() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "zzz");
+        assert_eq!(app.selected(), None);
+        assert_eq!(press(&mut app, KeyCode::Enter), Action::None);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected_index(), 0);
+    }
+
+    #[test]
+    fn delete_last_word_works_like_a_shell() {
+        let cases = [
+            ("git push", "git "),
+            ("git push  ", "git "),
+            ("git", ""),
+            ("", ""),
+        ];
+        for (input, expected) in cases {
+            let mut s = input.to_owned();
+            delete_last_word(&mut s);
+            assert_eq!(s, expected, "input: {input:?}");
+        }
     }
 }
