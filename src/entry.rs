@@ -14,6 +14,8 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
     Text,
+    /// A single http(s) URL and nothing else.
+    Url,
     Image {
         format: String,
         width: u32,
@@ -27,7 +29,13 @@ impl Entry {
     pub fn parse(line: &str) -> Option<Self> {
         let (id, preview) = line.split_once('\t')?;
         let id = id.parse().ok()?;
-        let kind = parse_image(preview).unwrap_or(Kind::Text);
+        let kind = parse_image(preview).unwrap_or_else(|| {
+            if is_url(preview) {
+                Kind::Url
+            } else {
+                Kind::Text
+            }
+        });
         Some(Self {
             raw: line.to_owned(),
             id,
@@ -57,6 +65,15 @@ fn parse_image(preview: &str) -> Option<Kind> {
         height: h.parse().ok()?,
         size: format!("{num} {unit}"),
     })
+}
+
+/// True if the preview is one http(s) URL with nothing around it.
+fn is_url(preview: &str) -> bool {
+    let p = preview.trim();
+    let rest = p
+        .strip_prefix("https://")
+        .or_else(|| p.strip_prefix("http://"));
+    matches!(rest, Some(r) if !r.is_empty() && !r.contains(char::is_whitespace))
 }
 
 /// Parses the full output of `cliphist list`, skipping malformed lines.
@@ -95,6 +112,17 @@ mod tests {
     fn text_that_looks_like_binary_is_text() {
         let e = Entry::parse("1\t[[ binary data is cool ]]").unwrap();
         assert_eq!(e.kind, Kind::Text);
+    }
+
+    #[test]
+    fn detects_urls() {
+        let kind = |p: &str| Entry::parse(&format!("1\t{p}")).unwrap().kind;
+        assert_eq!(kind("https://example.com/a?b=c"), Kind::Url);
+        assert_eq!(kind("  http://example.com  "), Kind::Url);
+        assert_eq!(kind("https://"), Kind::Text);
+        assert_eq!(kind("see https://example.com"), Kind::Text);
+        assert_eq!(kind("https://a.com https://b.com"), Kind::Text);
+        assert_eq!(kind("magnet:?xt=urn:btih:abc"), Kind::Text);
     }
 
     #[test]
