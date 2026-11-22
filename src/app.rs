@@ -2,12 +2,19 @@
 //! Keeping this free of drawing code means it can be unit-tested with a
 //! fake backend.
 
+use std::collections::VecDeque;
+
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 
 use crate::entry::Entry;
+use crate::preview::{Content, Loaded};
 use crate::search::{Match, Searcher};
+
+/// How many loaded previews to keep, so moving back and forth over the
+/// same entries doesn't decode them again.
+const PREVIEW_CACHE: usize = 16;
 
 /// Where history comes from and where changes go. The real implementation
 /// is `cliphist::Cliphist`; tests use an in-memory fake.
@@ -63,6 +70,13 @@ pub struct App<B: Backend> {
     /// Id of the entry that was armed for deletion by the previous key
     /// press. Only the very next key can confirm it.
     pending_delete: Option<u64>,
+    /// Loaded previews by entry id, most recently loaded first.
+    previews: VecDeque<(u64, Content)>,
+    /// The entry whose preview was last requested from the loader.
+    preview_requested: Option<u64>,
+    /// Preview scroll position, as (entry id, first visible line). Tied to
+    /// the entry so moving the selection starts the next preview at the top.
+    preview_scroll: (u64, usize),
 }
 
 impl<B: Backend> App<B> {
@@ -80,13 +94,12 @@ impl<B: Backend> App<B> {
             page_height: 10,
             list_state: ListState::default(),
             pending_delete: None,
+            previews: VecDeque::new(),
+            preview_requested: None,
+            preview_scroll: (0, 0),
         };
         app.refilter_from_top();
         Ok(app)
-    }
-
-    pub fn backend(&self) -> &B {
-        &self.backend
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -145,6 +158,14 @@ impl<B: Backend> App<B> {
         if ctrl && key.code == KeyCode::Char('c') {
             return Action::Quit;
         }
+        // Shift+arrows scroll the preview in both modes.
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            match key.code {
+                KeyCode::Down => return self.scroll_preview(1),
+                KeyCode::Up => return self.scroll_preview(-1),
+                _ => {}
+            }
+        }
         match self.mode {
             Mode::Normal => self.normal_key(key.code, ctrl, pending_delete),
             Mode::Search => self.search_key(key, ctrl),
@@ -172,6 +193,8 @@ impl<B: Backend> App<B> {
             KeyCode::Char('k') => self.move_by(-1),
             KeyCode::Char('g') => self.selected = 0,
             KeyCode::Char('G') => self.selected = self.last_index(),
+            KeyCode::Char('J') => return self.scroll_preview(1),
+            KeyCode::Char('K') => return self.scroll_preview(-1),
 
             KeyCode::Enter => return self.copy_selected(),
             KeyCode::Char('d') | KeyCode::Delete => self.press_delete(pending_delete),
@@ -325,6 +348,64 @@ impl<B: Backend> App<B> {
             Ok(()) => Status::Info("deleted 1 entry".into()),
             Err(e) => Status::Error(format!("{e:#}")),
         });
+    }
+
+    // --- previews ---------------------------------------------------------
+
+    /// The entry whose preview should be loaded next, if any. The main loop
+    /// calls this after every event and sends the result to the loader.
+    pub fn preview_request(&mut self) -> Option<Entry> {
+        let entry = self.selected()?;
+        let id = entry.id;
+        let loaded = self.previews.iter().any(|(i, _)| *i == id);
+        if loaded || self.preview_requested == Some(id) {
+            return None;
+        }
+        let entry = entry.clone();
+        self.preview_requested = Some(id);
+        Some(entry)
+    }
+
+    /// Stores a preview from the loader.
+    pub fn preview_loaded(&mut self, loaded: Loaded) {
+        if self.preview_requested == Some(loaded.id) {
+            self.preview_requested = None;
+        }
+        self.previews.retain(|(id, _)| *id != loaded.id);
+        self.previews.push_front((loaded.id, loaded.content));
+        self.previews.truncate(PREVIEW_CACHE);
+    }
+
+    /// The selected entry, its preview if loaded, and the scroll position.
+    /// The preview is `&mut` because image previews keep encoding state
+    /// that the widget updates while drawing.
+    pub fn preview_view(&mut self) -> Option<(&Entry, Option<&mut Content>, usize)> {
+        // Direct field access (not `self.selected()`) so that `entries` and
+        // `previews` can be borrowed at the same time.
+        let entry = &self.entries[self.matches.get(self.selected)?.index];
+        let content = self
+            .previews
+            .iter_mut()
+            .find(|(id, _)| *id == entry.id)
+            .map(|(_, content)| content);
+        let scroll = match self.preview_scroll {
+            (id, line) if id == entry.id => line,
+            _ => 0,
+        };
+        Some((entry, content, scroll))
+    }
+
+    fn scroll_preview(&mut self, delta: isize) -> Action {
+        let Some((entry, content, scroll)) = self.preview_view() else {
+            return Action::None;
+        };
+        let max = match content {
+            Some(Content::Text { lines, .. }) => lines.len().saturating_sub(1),
+            _ => 0,
+        };
+        let line = (scroll as isize + delta).clamp(0, max as isize) as usize;
+        self.preview_scroll = (entry.id, line);
+        Action::None
     }
 }
 
@@ -706,6 +787,94 @@ mod tests {
         assert_eq!(press(&mut app, KeyCode::Enter), Action::None);
         press(&mut app, KeyCode::Down);
         assert_eq!(app.selected_index(), 0);
+    }
+
+    // --- previews ---------------------------------------------------------
+
+    fn text_preview(app: &mut App<Fake>, id: u64, text: &str) {
+        app.preview_loaded(Loaded {
+            id,
+            content: crate::preview::text_content(text.as_bytes()),
+        });
+    }
+
+    fn shift(app: &mut App<Fake>, code: KeyCode) {
+        app.handle_key(KeyEvent::new(code, KeyModifiers::SHIFT));
+    }
+
+    fn preview_scroll(app: &mut App<Fake>) -> usize {
+        app.preview_view().unwrap().2
+    }
+
+    #[test]
+    fn preview_is_requested_once_per_entry() {
+        let mut app = app();
+        assert_eq!(app.preview_request().map(|e| e.id), Some(5));
+        // Already requested: don't ask again while it loads.
+        assert_eq!(app.preview_request(), None);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.preview_request().map(|e| e.id), Some(4));
+    }
+
+    #[test]
+    fn loaded_preview_is_shown_for_selected_entry() {
+        let mut app = app();
+        app.preview_request();
+        assert!(app.preview_view().unwrap().1.is_none(), "not loaded yet");
+        text_preview(&mut app, 5, "full text");
+        let (entry, content, _) = app.preview_view().unwrap();
+        assert_eq!(entry.id, 5);
+        assert!(matches!(content, Some(Content::Text { .. })));
+        // Loaded previews aren't requested again.
+        assert_eq!(app.preview_request(), None);
+    }
+
+    #[test]
+    fn cached_previews_are_reused_when_moving_back() {
+        let mut app = app();
+        text_preview(&mut app, 5, "five");
+        text_preview(&mut app, 4, "four");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.preview_request(), None);
+        assert!(app.preview_view().unwrap().1.is_some());
+    }
+
+    #[test]
+    fn preview_cache_is_bounded() {
+        let mut app = app();
+        for id in 100..100 + PREVIEW_CACHE as u64 {
+            text_preview(&mut app, id, "x");
+        }
+        text_preview(&mut app, 5, "x");
+        assert_eq!(app.previews.len(), PREVIEW_CACHE);
+        // The oldest one was evicted.
+        assert!(!app.previews.iter().any(|(id, _)| *id == 100));
+    }
+
+    #[test]
+    fn preview_scrolls_within_bounds_and_resets_on_move() {
+        let mut app = app();
+        text_preview(&mut app, 5, "a\nb\nc");
+        press(&mut app, KeyCode::Char('J'));
+        shift(&mut app, KeyCode::Down);
+        shift(&mut app, KeyCode::Down);
+        assert_eq!(preview_scroll(&mut app), 2, "stops at the last line");
+        press(&mut app, KeyCode::Char('K'));
+        assert_eq!(preview_scroll(&mut app), 1);
+
+        press(&mut app, KeyCode::Down);
+        assert_eq!(preview_scroll(&mut app), 0, "next entry starts at the top");
+    }
+
+    #[test]
+    fn shift_arrows_scroll_in_search_mode_too() {
+        let mut app = app();
+        text_preview(&mut app, 5, "a\nb");
+        press(&mut app, KeyCode::Char('f'));
+        shift(&mut app, KeyCode::Down);
+        assert_eq!(preview_scroll(&mut app), 1);
+        assert_eq!(app.selected_index(), 0, "selection didn't move");
     }
 
     #[test]

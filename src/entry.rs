@@ -1,5 +1,7 @@
 //! Parsing of `cliphist list` output.
 
+use crate::sanitize::sanitize;
+
 /// One line of `cliphist list`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -46,7 +48,8 @@ impl Entry {
                 height,
                 size,
             } => format!("[image] {format} {width}x{height} · {size}"),
-            Kind::Text | Kind::Url => preview.to_owned(),
+            // The list shows one line per entry, so newlines become spaces too.
+            Kind::Text | Kind::Url => sanitize(preview, " ").replace('\n', " "),
         };
         Some(Self {
             raw: line.to_owned(),
@@ -137,6 +140,14 @@ mod tests {
         assert_eq!(kind("see https://example.com"), Kind::Text);
         assert_eq!(kind("https://a.com https://b.com"), Kind::Text);
         assert_eq!(kind("magnet:?xt=urn:btih:abc"), Kind::Text);
+    }
+
+    #[test]
+    fn label_is_safe_to_draw() {
+        let e = Entry::parse("1\t\x1b[1mbold\x1b[0m\tnext").unwrap();
+        assert_eq!(e.label, "␛[1mbold␛[0m next");
+        // `raw` stays untouched: cliphist needs the exact line back.
+        assert_eq!(e.raw, "1\t\x1b[1mbold\x1b[0m\tnext");
     }
 
     #[test]

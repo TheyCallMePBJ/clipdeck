@@ -12,6 +12,7 @@ use crate::app::Backend;
 use crate::entry::{Entry, parse_list};
 
 /// The real backend: runs the `cliphist` binary.
+#[derive(Clone)]
 pub struct Cliphist {
     /// Passed to cliphist as `-db-path` when set; otherwise cliphist's default is used.
     db_path: Option<PathBuf>,

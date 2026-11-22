@@ -32,7 +32,8 @@ straight through cliphist.
 - A Wayland compositor (developed on Hyprland)
 - `cliphist` and `wl-clipboard` (`wl-copy`, `wl-paste`)
 - A terminal with the kitty graphics protocol for image previews (Ghostty,
-  kitty, WezTerm). Other terminals fall back to text-only previews.
+  kitty, WezTerm). Other terminals fall back to a
+  lower-resolution preview drawn with block characters.
 - Optional: `wtype`, for paste-on-select
 
 ## Setup

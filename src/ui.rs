@@ -1,17 +1,23 @@
 //! Drawing. Reads the app state and renders one frame; no logic lives here.
 
+use image::imageops::FilterType;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
+use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, Backend, Mode, Status};
 use crate::entry::{Entry, Kind};
+use crate::preview::Content;
 use crate::search::Match;
 
+/// Below this many columns there's no room for a preview next to the list.
+const MIN_WIDTH_FOR_PREVIEW: u16 = 70;
+
 pub fn draw<B: Backend>(frame: &mut Frame, app: &mut App<B>) {
-    let [search_area, list_area, status_area] = Layout::vertical([
+    let [search_area, main_area, status_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(1),
@@ -20,6 +26,19 @@ pub fn draw<B: Backend>(frame: &mut Frame, app: &mut App<B>) {
 
     draw_search_line(frame, app, search_area);
 
+    if main_area.width >= MIN_WIDTH_FOR_PREVIEW {
+        let [list_area, preview_area] =
+            Layout::horizontal([Constraint::Percentage(45), Constraint::Fill(1)]).areas(main_area);
+        draw_list(frame, app, list_area);
+        draw_preview(frame, app, preview_area);
+    } else {
+        draw_list(frame, app, main_area);
+    }
+
+    frame.render_widget(status_line(app), status_area);
+}
+
+fn draw_list<B: Backend>(frame: &mut Frame, app: &mut App<B>, list_area: Rect) {
     // The border takes one row at the top and one at the bottom.
     app.set_page_height(list_area.height.saturating_sub(2) as usize);
     let block = Block::bordered().title(" clipdeck ");
@@ -43,8 +62,98 @@ pub fn draw<B: Backend>(frame: &mut Frame, app: &mut App<B>) {
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, list_area, state);
     }
+}
 
-    frame.render_widget(status_line(app), status_area);
+fn draw_preview<B: Backend>(frame: &mut Frame, app: &mut App<B>, area: Rect) {
+    let block = Block::bordered();
+    let Some((entry, content, scroll)) = app.preview_view() else {
+        // Nothing selected (empty history or no matches).
+        frame.render_widget(block.title(" preview "), area);
+        return;
+    };
+    let block = block.title(preview_title(entry, content.as_deref()));
+
+    match content {
+        None => {
+            let loading = Paragraph::new("loading…".dim()).block(block);
+            frame.render_widget(loading, area);
+        }
+        Some(Content::Text { lines, .. }) => {
+            // Only hand the visible lines to the widget: wrapping a
+            // 5000-line entry on every frame would be wasted work. Each
+            // line takes at least one row, so this always fills the pane.
+            let rows = area.height.saturating_sub(2) as usize;
+            let visible: Vec<Line> = lines
+                .iter()
+                .skip(scroll)
+                .take(rows)
+                .map(|l| Line::raw(l.as_str()))
+                .collect();
+            let text = Paragraph::new(visible)
+                .wrap(Wrap { trim: false })
+                .block(block);
+            frame.render_widget(text, area);
+        }
+        Some(Content::Image(protocol)) => {
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            // The thumbnail is usually bigger than the pane, so it gets
+            // scaled down to fit. ratatui-image defaults to nearest-neighbour
+            // scaling, which drops pixels and makes text in screenshots
+            // jagged; Lanczos3 keeps it legible. The scaled result is cached
+            // in the protocol state, so this runs once per image and size.
+            let widget = StatefulImage::default().resize(Resize::Fit(Some(FilterType::Lanczos3)));
+            frame.render_stateful_widget(widget, inner, protocol.as_mut());
+        }
+        Some(Content::Error(msg)) => {
+            let error = Paragraph::new(msg.as_str().fg(Color::Red))
+                .wrap(Wrap { trim: false })
+                .block(block);
+            frame.render_widget(error, area);
+        }
+    }
+}
+
+/// E.g. " text · 12 lines · 1.4 KiB " or " png 2560x1440 · 2 MiB ".
+fn preview_title(entry: &Entry, content: Option<&Content>) -> String {
+    let kind = match &entry.kind {
+        Kind::Text => "text",
+        Kind::Url => "url",
+        Kind::Image {
+            format,
+            width,
+            height,
+            size,
+        } => return format!(" {format} {width}x{height} · {size} "),
+    };
+    match content {
+        Some(Content::Text {
+            lines,
+            bytes,
+            truncated,
+        }) => {
+            let count = lines.len();
+            let plural = if count == 1 { "" } else { "s" };
+            let more = if *truncated { " (truncated)" } else { "" };
+            format!(
+                " {kind} · {count} line{plural}{more} · {} ",
+                human_size(*bytes)
+            )
+        }
+        _ => format!(" {kind} "),
+    }
+}
+
+fn human_size(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KIB {
+        format!("{bytes} B")
+    } else if b < KIB * KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{:.1} MiB", b / KIB / KIB)
+    }
 }
 
 fn draw_search_line<B: Backend>(frame: &mut Frame, app: &App<B>, area: Rect) {
@@ -114,7 +223,9 @@ fn status_line<B: Backend>(app: &App<B>) -> Line<'static> {
                 position.push_str(&format!(" of {total}"));
             }
             let keys = match app.mode() {
-                Mode::Normal => "j/k move · enter copy · f search · dd delete · r reload · q quit",
+                Mode::Normal => {
+                    "j/k move · J/K scroll · enter copy · f search · dd delete · q quit"
+                }
                 Mode::Search => "type to filter · ↑/↓ move · enter copy · esc done",
             };
             Line::from(format!(" {position} · {keys}")).dim()
@@ -190,6 +301,54 @@ mod tests {
         assert!(screen.contains("> https://example.com"), "{screen}");
         assert!(!screen.contains("git push"), "{screen}");
         assert!(screen.contains("1/1 of 3"), "{screen}");
+    }
+
+    fn render_wide(app: &mut App<Fixed>) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 8)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn narrow_terminal_has_no_preview() {
+        let screen = render(&mut app());
+        assert!(!screen.contains("loading"), "{screen}");
+    }
+
+    #[test]
+    fn wide_terminal_shows_loading_then_text() {
+        let mut app = app();
+        assert!(render_wide(&mut app).contains("loading…"));
+        app.preview_loaded(crate::preview::Loaded {
+            id: 3,
+            content: crate::preview::text_content(b"git push --force-with-lease\nsecond line"),
+        });
+        let screen = render_wide(&mut app);
+        assert!(screen.contains("text · 2 lines · 39 B"), "{screen}");
+        assert!(screen.contains("git push --force-with-lease"), "{screen}");
+        assert!(screen.contains("second line"), "{screen}");
+    }
+
+    #[test]
+    fn preview_title_for_images_uses_entry_info() {
+        let app = app();
+        let image = &app.entries()[1];
+        assert_eq!(preview_title(image, None), " png 2560x1440 · 2 MiB ");
+    }
+
+    #[test]
+    fn human_sizes() {
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1536), "1.5 KiB");
+        assert_eq!(human_size(3 * 1024 * 1024), "3.0 MiB");
     }
 
     #[test]
