@@ -6,6 +6,7 @@ mod preview;
 mod sanitize;
 mod search;
 mod ui;
+mod watch;
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
@@ -38,11 +39,34 @@ struct Cli {
     db_path: Option<PathBuf>,
 }
 
+/// Starts watching cliphist's database for live reload. Returns the watcher,
+/// which must be kept alive, plus a line for `--timing` saying what
+/// happened. Live reload is a nicety: if it can't be set up, clipdeck works
+/// as before (with `r` to reload).
+fn start_watching(
+    db_path: Option<&std::path::Path>,
+    events: mpsc::Sender<Event>,
+) -> (Option<notify::RecommendedWatcher>, String) {
+    let Some(path) = watch::resolve_db_path(db_path, |name| std::env::var(name).ok()) else {
+        return (
+            None,
+            "live reload: off (can't find cliphist's database)".into(),
+        );
+    };
+    match watch::watch(&path, events) {
+        Ok(watcher) => (
+            Some(watcher),
+            format!("live reload: watching {}", path.display()),
+        ),
+        Err(e) => (None, format!("live reload: off ({e:#})")),
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let start = Instant::now();
 
-    let cliphist = Cliphist::new(cli.db_path);
+    let cliphist = Cliphist::new(cli.db_path.clone());
     let mut app = App::new(cliphist.clone())?;
     let listed = start.elapsed();
 
@@ -59,6 +83,9 @@ fn main() -> Result<()> {
 
     let (events, incoming) = mpsc::channel();
     event::spawn_input_thread(events.clone());
+    // Kept in a variable so it lives until `main` returns; dropping it
+    // would stop the watch.
+    let (_watcher, watch_status) = start_watching(cli.db_path.as_deref(), events.clone());
     let decoder = cliphist.clone();
     let loader = Loader::spawn(
         move |entry: &Entry| decoder.decode(entry),
@@ -79,6 +106,7 @@ fn main() -> Result<()> {
             queried - listed
         );
         eprintln!("image protocol: {protocol:?}");
+        eprintln!("{watch_status}");
     }
     // Copy after the terminal is restored so errors print cleanly.
     if let Some(entry) = selected {
@@ -115,6 +143,7 @@ fn run<B: Backend>(
             },
             Event::Key(_) | Event::Redraw => {}
             Event::Preview(loaded) => app.preview_loaded(loaded),
+            Event::HistoryChanged => app.history_changed(),
             Event::InputError(e) => bail!("reading terminal input failed: {e}"),
         }
     }

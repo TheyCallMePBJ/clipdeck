@@ -1,8 +1,8 @@
 //! Everything the main loop reacts to, delivered through one channel.
 //!
 //! Several threads produce events: one reads the terminal, the preview
-//! loader reports finished previews (and later a file watcher will report
-//! history changes). The main loop blocks on the channel's receiving end
+//! loader reports finished previews, and the database watcher reports
+//! history changes. The main loop blocks on the channel's receiving end
 //! and handles whichever event arrives first.
 
 use std::sync::mpsc::Sender;
@@ -18,6 +18,8 @@ pub enum Event {
     Redraw,
     /// The preview loader finished an entry.
     Preview(Loaded),
+    /// cliphist's database changed, e.g. something new was copied.
+    HistoryChanged,
     /// Reading the terminal failed; the app can't continue.
     InputError(std::io::Error),
 }

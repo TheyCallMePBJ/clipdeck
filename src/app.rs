@@ -316,6 +316,15 @@ impl<B: Backend> App<B> {
         Ok(())
     }
 
+    /// Called when cliphist's history changed outside clipdeck. Reloads
+    /// quietly: unlike `r`, a successful reload shows no message, and any
+    /// message already showing (like a delete prompt) stays.
+    pub fn history_changed(&mut self) {
+        if let Err(e) = self.reload() {
+            self.status = Some(Status::Error(format!("{e:#}")));
+        }
+    }
+
     /// First press arms the delete; a second press on the same entry,
     /// straight after, performs it.
     fn press_delete(&mut self, pending: Option<u64>) {
@@ -629,6 +638,33 @@ mod tests {
         app.reload().unwrap();
         assert_eq!(selected_id(&app), 4);
         assert_eq!(app.selected_index(), 2);
+    }
+
+    #[test]
+    fn history_change_reloads_quietly_and_keeps_prompt() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('d')); // arms id 5
+        app.backend.entries.insert(0, entry(6, "copied elsewhere"));
+        app.history_changed();
+
+        assert_eq!(app.entries().len(), 6);
+        assert_eq!(selected_id(&app), 5, "selection stays on the same entry");
+        assert!(matches!(app.status(), Some(Status::Prompt(_))));
+        // The armed delete still applies to the same entry.
+        press(&mut app, KeyCode::Char('d'));
+        assert!(!app.entries().iter().any(|e| e.id == 5));
+    }
+
+    #[test]
+    fn history_change_keeps_search() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "git");
+        app.backend.entries.insert(0, entry(9, "git stash"));
+        app.history_changed();
+        assert_eq!(app.mode(), Mode::Search);
+        assert_eq!(app.query(), "git");
+        assert_eq!(app.match_count(), 3);
     }
 
     #[test]
