@@ -13,18 +13,29 @@ its own copy of the history: **cliphist is the single source of truth**.
 Whatever you see in clipdeck is what cliphist holds, and every change goes
 straight through cliphist.
 
-## Features (v1)
+## Features
 
-- **Fuzzy search** across history (fzf-like matching via `nucleo-matcher`)
-- **Preview pane**: full text for text entries, which `cliphist list` cuts
-  off, and real image thumbnails via the kitty graphics protocol
-- **Pins**: keep entries at the top; they survive re-copies, trimming and
-  `cliphist wipe`
-- **Delete / multi-select delete / wipe** (wipe asks for confirmation)
-- **Type filters**: text, image, URL
-- **Enter** copies the entry and exits; optionally pastes it directly via `wtype`
-- **Live reload** when history changes while the popup is open
-- Vim-style keybinds plus arrow keys, all configurable
+- **Fuzzy search** across history (`f` or `/`), with fzf query syntax
+  (`'exact`, `^prefix`, `suffix$`, `!exclude`) and smart case. Matches are
+  highlighted. Search covers the preview text `cliphist list` shows, which is
+  the first 100 characters of each entry.
+- **Preview pane**: the full text of the highlighted entry (which
+  `cliphist list` cuts off), and image thumbnails via the kitty graphics
+  protocol. Thumbnails are cached on disk.
+- **Pins** (`p`): keep entries at the top. They survive re-copies, cliphist
+  trimming old entries, and `cliphist wipe`.
+- **Delete** (`dd`): press `d` twice so nothing is deleted by accident.
+- **Enter** copies the entry and exits.
+- **Live reload** when history changes while the popup is open.
+- Vim-style keys plus arrow keys.
+
+## Planned
+
+- Select several entries and delete them at once
+- Wipe history from clipdeck (with confirmation, keeping pins)
+- Type filters: text, image, URL
+- Paste the entry straight into the previous window via `wtype`
+- Configurable keybinds and colors
 - `--pick` mode: print the selected entry to stdout, for use in scripts
 
 ## Requirements
@@ -34,7 +45,25 @@ straight through cliphist.
 - A terminal with the kitty graphics protocol for image previews (Ghostty,
   kitty, WezTerm). Other terminals fall back to a
   lower-resolution preview drawn with block characters.
-- Optional: `wtype`, for paste-on-select
+- Rust, to build it (install through [rustup](https://rustup.rs) or your
+  distro's package)
+
+## Install
+
+```bash
+git clone https://github.com/TheyCallMePBJ/clipdeck
+cd clipdeck
+cargo install --path .
+```
+
+This builds clipdeck and puts the binary in `~/.cargo/bin/clipdeck`. To
+update later, `git pull` and run `cargo install --path .` again.
+
+> **PATH note:** `~/.cargo/bin` is often added to `PATH` only by your shell's
+> config, which your compositor doesn't read. If a keybind reports that
+> `clipdeck` can't be found, use the full path in the bind
+> (`ghostty --title=clipdeck -e /home/you/.cargo/bin/clipdeck`) or add
+> `~/.cargo/bin` to your session's `PATH`.
 
 ## Setup
 
@@ -82,7 +111,7 @@ window's *initial* title, so the title has to be set at launch with
 | Preview       | `cliphist decode`, only for the highlighted entry (lazy) |
 | Copy          | `cliphist decode \| wl-copy`                             |
 | Delete        | send the original `cliphist list` line to `cliphist delete` |
-| Wipe          | `cliphist wipe`                                          |
+| Wipe (planned) | `cliphist wipe`                                         |
 | Stay in sync  | watch cliphist's DB (`~/.cache/cliphist/db` by default) with `notify`, then re-list |
 
 After any change, list again rather than editing the UI's copy, so the
@@ -93,7 +122,7 @@ because the database format is internal to cliphist and may change.
 
 ### Owned state: metadata only
 
-clipdeck stores no history of its own, only metadata (currently just pins).
+clipdeck stores no history of its own, only pins.
 
 - **Pins are keyed by a blake3 content hash, not cliphist ID.** cliphist IDs
   aren't stable: copying something that's already in history moves it to the
@@ -106,7 +135,7 @@ clipdeck stores no history of its own, only metadata (currently just pins).
 
 ### Paths (XDG)
 
-- Config: `~/.config/clipdeck/config.toml`
+- Config (planned): `~/.config/clipdeck/config.toml`
 - Pins: `~/.local/share/clipdeck/pins.toml` (the list) and
   `~/.local/share/clipdeck/pins/<hash>` (each pin's content)
 - Thumbnail cache: `~/.cache/clipdeck/thumbs/`
@@ -120,23 +149,25 @@ clipdeck stores no history of its own, only metadata (currently just pins).
 | Image previews  | `ratatui-image` + `image`   |
 | Watching the DB | `notify`                    |
 | Content hashing | `blake3`                    |
-| Config / pins   | `serde` + `toml`            |
+| Pins file       | `serde` + `toml`            |
 | XDG paths       | `directories`               |
 | CLI             | `clap`                      |
 | Running cliphist / wl-copy | `std::process::Command` |
 
 ## Roadmap
 
-1. **Stub and launch check**: a binary that prints `cliphist list` in a ratatui
-   list. Wire up the Hyprland bind and rules, and measure Ghostty startup time.
-2. **Core loop**: navigation, copy-and-exit, delete, re-list after changes.
-3. **Search**: fuzzy filtering with `nucleo-matcher`.
-4. **Preview pane**: full text first, then image thumbnails and the thumbnail cache.
-5. **Live reload**: watch the DB with `notify`.
-6. **Pins**: hash-keyed pin store and a pinned section at the top.
-7. **Polish**: multi-select, type filters, wipe confirmation, `--pick`,
-   `wtype` paste, configurable keybinds and colors.
-8. **Release**: README GIF (`vhs`), AUR package, `cargo install`.
+- [x] **Stub and launch check**: `cliphist list` in a ratatui list, the
+  Hyprland bind and window rules, and Ghostty startup time (about 10 ms to
+  the first frame).
+- [x] **Core loop**: navigation, copy-and-exit, delete, re-listing after
+  every change.
+- [x] **Search**: fuzzy filtering with `nucleo-matcher`.
+- [x] **Preview pane**: full text, image thumbnails, and the thumbnail cache.
+- [x] **Live reload**: watching cliphist's database with `notify`.
+- [x] **Pins**: hash-keyed pin store and a pinned section at the top.
+- [ ] **Polish**: multi-select, type filters, wipe with confirmation,
+  `--pick`, `wtype` paste, configurable keybinds and colors.
+- [ ] **Release**: README GIF (`vhs`), AUR package, crates.io.
 
 ## Non-goals
 
