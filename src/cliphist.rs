@@ -33,43 +33,52 @@ impl Cliphist {
         cmd
     }
 
-    /// Runs `cliphist decode` with the entry's original line on stdin.
-    pub fn decode(&self, entry: &Entry) -> Result<Vec<u8>> {
-        run(self.command("decode"), Some(entry.raw.as_bytes()))
-    }
-
-    /// Decodes the entry and hands it to `wl-copy`.
-    ///
-    /// `wl-copy` forks a background process that serves the selection. It is
-    /// put in its own process group so that closing the terminal window (which
-    /// signals our process group) doesn't take the clipboard with it.
+    /// Decodes the entry and puts it on the clipboard.
     pub fn copy(&self, entry: &Entry) -> Result<()> {
-        let data = self.decode(entry)?;
-        let mut child = Command::new("wl-copy")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .context("failed to run `wl-copy` (is wl-clipboard installed?)")?;
-        child
-            .stdin
-            .take()
-            .expect("stdin is piped")
-            .write_all(&data)?;
-        // The foreground wl-copy exits once it has read stdin and forked.
-        let status = child.wait()?;
-        if !status.success() {
-            bail!("wl-copy exited with {status}");
-        }
-        Ok(())
+        wl_copy(&self.decode(entry)?)
     }
+}
+
+/// Puts `data` on the clipboard with `wl-copy`.
+///
+/// `wl-copy` forks a background process that serves the selection. It is
+/// put in its own process group so that closing the terminal window (which
+/// signals our process group) doesn't take the clipboard with it.
+pub fn wl_copy(data: &[u8]) -> Result<()> {
+    let mut child = Command::new("wl-copy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .context("failed to run `wl-copy` (is wl-clipboard installed?)")?;
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(data)?;
+    // The foreground wl-copy exits once it has read stdin and forked.
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("wl-copy exited with {status}");
+    }
+    Ok(())
 }
 
 impl Backend for Cliphist {
     fn list(&self) -> Result<Vec<Entry>> {
         let out = run(self.command("list"), None)?;
         Ok(parse_list(&String::from_utf8_lossy(&out)))
+    }
+
+    /// Runs `cliphist decode` with the entry's original line on stdin.
+    fn decode(&self, entry: &Entry) -> Result<Vec<u8>> {
+        run(self.command("decode"), Some(entry.raw.as_bytes()))
+    }
+
+    fn store(&mut self, data: &[u8]) -> Result<()> {
+        run(self.command("store"), Some(data))?;
+        Ok(())
     }
 
     fn delete(&mut self, entry: &Entry) -> Result<()> {
@@ -135,7 +144,7 @@ mod tests {
         let mut backend = Cliphist::new(Some(dir.join("db")));
 
         for text in ["first", "second", "third"] {
-            run(backend.command("store"), Some(text.as_bytes())).unwrap();
+            backend.store(text.as_bytes()).unwrap();
         }
         let entries = backend.list().unwrap();
         let previews: Vec<_> = entries.iter().map(|e| e.preview.as_str()).collect();

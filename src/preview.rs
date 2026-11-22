@@ -17,6 +17,7 @@ use ratatui_image::protocol::StatefulProtocol;
 
 use crate::entry::{Entry, Kind};
 use crate::event::Event;
+use crate::item::ItemId;
 use crate::sanitize::sanitize;
 
 /// At most this much of an entry is shown as text.
@@ -43,20 +44,35 @@ pub enum Content {
     Error(String),
 }
 
-/// A preview for one entry, sent back from the loader thread.
+/// A preview for one row, sent back from the loader thread.
 pub struct Loaded {
-    pub id: u64,
+    pub id: ItemId,
     pub content: Content,
+}
+
+/// What to load a preview for.
+pub struct Request {
+    pub id: ItemId,
+    pub kind: Kind,
+    pub source: Source,
+}
+
+/// Where a preview's bytes come from.
+pub enum Source {
+    /// A history entry, decoded by cliphist.
+    History(Entry),
+    /// A file, such as a pin's stored content.
+    File(PathBuf),
 }
 
 /// Handle for sending work to the loader thread.
 pub struct Loader {
-    requests: Sender<Entry>,
+    requests: Sender<Request>,
 }
 
 impl Loader {
-    /// Starts the loader thread. `decode` fetches an entry's bytes (in the
-    /// app, `cliphist decode`); results are sent to `events`.
+    /// Starts the loader thread. `decode` fetches a history entry's bytes
+    /// (in the app, `cliphist decode`); results are sent to `events`.
     ///
     /// `decode` is a generic closure rather than a `Cliphist` so tests can
     /// pass a fake. `Send + 'static` is what moving it into a new thread
@@ -71,19 +87,19 @@ impl Loader {
     where
         D: Fn(&Entry) -> Result<Vec<u8>> + Send + 'static,
     {
-        let (requests, incoming) = mpsc::channel::<Entry>();
+        let (requests, incoming) = mpsc::channel::<Request>();
         thread::spawn(move || {
             // `recv` returns an error once the `Loader` (the sender) is
             // dropped, which ends the thread.
-            while let Ok(mut entry) = incoming.recv() {
+            while let Ok(mut request) = incoming.recv() {
                 // When the selection moves faster than previews load, only
                 // the newest request matters; skip the stale ones.
                 while let Ok(newer) = incoming.try_recv() {
-                    entry = newer;
+                    request = newer;
                 }
-                let content = load(&entry, &decode, &picker, thumbs_dir.as_deref());
+                let content = load(&request, &decode, &picker, thumbs_dir.as_deref());
                 let loaded = Loaded {
-                    id: entry.id,
+                    id: request.id,
                     content,
                 };
                 if events.send(Event::Preview(loaded)).is_err() {
@@ -94,22 +110,28 @@ impl Loader {
         Self { requests }
     }
 
-    pub fn request(&self, entry: Entry) {
+    pub fn request(&self, request: Request) {
         // Can only fail if the thread has stopped, and then there's
         // nothing useful to do about it here.
-        let _ = self.requests.send(entry);
+        let _ = self.requests.send(request);
     }
 }
 
-fn load<D>(entry: &Entry, decode: &D, picker: &Picker, thumbs_dir: Option<&Path>) -> Content
+fn load<D>(request: &Request, decode: &D, picker: &Picker, thumbs_dir: Option<&Path>) -> Content
 where
     D: Fn(&Entry) -> Result<Vec<u8>>,
 {
-    let bytes = match decode(entry) {
+    let bytes = match &request.source {
+        Source::History(entry) => decode(entry),
+        Source::File(path) => {
+            fs::read(path).with_context(|| format!("can't read {}", path.display()))
+        }
+    };
+    let bytes = match bytes {
         Ok(bytes) => bytes,
         Err(e) => return Content::Error(format!("{e:#}")),
     };
-    match entry.kind {
+    match request.kind {
         Kind::Text | Kind::Url => text_content(&bytes),
         Kind::Image { .. } => match thumbnail(&bytes, thumbs_dir) {
             Ok(image) => Content::Image(Box::new(picker.new_resize_protocol(image))),
@@ -308,6 +330,45 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    fn history_request(line: &str) -> Request {
+        let entry = Entry::parse(line).unwrap();
+        Request {
+            id: ItemId::History(entry.id),
+            kind: entry.kind.clone(),
+            source: Source::History(entry),
+        }
+    }
+
+    #[test]
+    fn loader_reads_files_for_pins() {
+        let dir = temp_dir("pin-preview");
+        let path = dir.join("content");
+        fs::write(&path, b"pinned text").unwrap();
+        let (events, received) = mpsc::channel();
+        let loader = Loader::spawn(
+            |_: &Entry| anyhow::bail!("cliphist isn't used for pins"),
+            Picker::halfblocks(),
+            None,
+            events,
+        );
+        loader.request(Request {
+            id: ItemId::Pin("abc".into()),
+            kind: Kind::Text,
+            source: Source::File(path),
+        });
+        match received.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Event::Preview(Loaded {
+                id: ItemId::Pin(hash),
+                content: Content::Text { lines, .. },
+            }) => {
+                assert_eq!(hash, "abc");
+                assert_eq!(lines, ["pinned text"]);
+            }
+            _ => panic!("unexpected event"),
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn loader_sends_previews_back() {
         let (events, received) = mpsc::channel();
@@ -317,10 +378,10 @@ mod tests {
             None,
             events,
         );
-        loader.request(Entry::parse("7\tfull text…").unwrap());
+        loader.request(history_request("7\tfull text…"));
         match received.recv_timeout(Duration::from_secs(5)).unwrap() {
             Event::Preview(Loaded {
-                id: 7,
+                id: ItemId::History(7),
                 content: Content::Text { lines, .. },
             }) => assert_eq!(lines, ["full text of 7"]),
             _ => panic!("unexpected event"),
@@ -336,7 +397,7 @@ mod tests {
             None,
             events,
         );
-        loader.request(Entry::parse("1\tx").unwrap());
+        loader.request(history_request("1\tx"));
         match received.recv_timeout(Duration::from_secs(5)).unwrap() {
             Event::Preview(Loaded {
                 content: Content::Error(msg),

@@ -2,6 +2,8 @@ mod app;
 mod cliphist;
 mod entry;
 mod event;
+mod item;
+mod pins;
 mod preview;
 mod sanitize;
 mod search;
@@ -18,7 +20,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::KeyEventKind;
 use ratatui_image::picker::Picker;
 
-use app::{Action, App, Backend};
+use app::{Action, App, Backend, CopySource};
 use cliphist::Cliphist;
 use entry::Entry;
 use event::Event;
@@ -67,7 +69,18 @@ fn main() -> Result<()> {
     let start = Instant::now();
 
     let cliphist = Cliphist::new(cli.db_path.clone());
-    let mut app = App::new(cliphist.clone())?;
+    // If the pins file can't be read, run without pins (and say so) rather
+    // than refusing to start: the popup closes on exit, so an error printed
+    // here would vanish before anyone could read it.
+    let (pins, pins_error) = match pins::default_dir().map(pins::Pins::load) {
+        Some(Ok(pins)) => (Some(pins), None),
+        Some(Err(e)) => (None, Some(format!("pins unavailable: {e:#}"))),
+        None => (None, Some("pins unavailable: no home directory".to_owned())),
+    };
+    let mut app = App::new(cliphist.clone(), pins)?;
+    if let Some(message) = &pins_error {
+        app.show_error(message.clone());
+    }
     let listed = start.elapsed();
 
     // ratatui::init also installs a panic hook that restores the terminal.
@@ -107,10 +120,15 @@ fn main() -> Result<()> {
         );
         eprintln!("image protocol: {protocol:?}");
         eprintln!("{watch_status}");
+        if let Some(message) = &pins_error {
+            eprintln!("{message}");
+        }
     }
     // Copy after the terminal is restored so errors print cleanly.
-    if let Some(entry) = selected {
-        cliphist.copy(&entry)?;
+    match selected {
+        Some(CopySource::Entry(entry)) => cliphist.copy(&entry)?,
+        Some(CopySource::Bytes(bytes)) => cliphist::wl_copy(&bytes)?,
+        None => {}
     }
     Ok(())
 }
@@ -123,13 +141,13 @@ fn run<B: Backend>(
     events: &Receiver<Event>,
     loader: &Loader,
     start: Instant,
-) -> Result<(Option<Entry>, Duration)> {
+) -> Result<(Option<CopySource>, Duration)> {
     let mut first_frame = None;
     loop {
         // Ask for the selected entry's preview if it isn't loaded or on
         // its way already. It arrives later as an `Event::Preview`.
-        if let Some(entry) = app.preview_request() {
-            loader.request(entry);
+        if let Some(request) = app.preview_request() {
+            loader.request(request);
         }
         terminal.draw(|f| ui::draw(f, app))?;
         first_frame.get_or_insert_with(|| start.elapsed());
@@ -139,7 +157,7 @@ fn run<B: Backend>(
             Event::Key(key) if key.kind == KeyEventKind::Press => match app.handle_key(key) {
                 Action::None => {}
                 Action::Quit => return Ok((None, first_frame.unwrap_or_default())),
-                Action::Copy(entry) => return Ok((Some(entry), first_frame.unwrap_or_default())),
+                Action::Copy(source) => return Ok((Some(source), first_frame.unwrap_or_default())),
             },
             Event::Key(_) | Event::Redraw => {}
             Event::Preview(loaded) => app.preview_loaded(loaded),

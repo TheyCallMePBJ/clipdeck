@@ -99,14 +99,16 @@ clipdeck stores no history of its own, only metadata (currently just pins).
   aren't stable: copying something that's already in history moves it to the
   top with a new ID.
 - **Pinned content is stored alongside the hash**, so pins survive cliphist
-  trimming old entries and `cliphist wipe`.
+  trimming old entries and `cliphist wipe`. Unpinning something cliphist no
+  longer has puts it back into history, so it isn't lost.
 - Thumbnails are cached in `~/.cache/clipdeck/` by content hash, so large
   screenshots aren't decoded again every time it opens.
 
 ### Paths (XDG)
 
 - Config: `~/.config/clipdeck/config.toml`
-- Pins: `~/.local/share/clipdeck/pins.toml`
+- Pins: `~/.local/share/clipdeck/pins.toml` (the list) and
+  `~/.local/share/clipdeck/pins/<hash>` (each pin's content)
 - Thumbnail cache: `~/.cache/clipdeck/thumbs/`
 
 ## Stack

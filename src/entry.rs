@@ -1,5 +1,7 @@
 //! Parsing of `cliphist list` output.
 
+use serde::{Deserialize, Serialize};
+
 use crate::sanitize::sanitize;
 
 /// One line of `cliphist list`.
@@ -16,7 +18,9 @@ pub struct Entry {
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Saved in `pins.toml` as e.g. `kind = { type = "text" }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum Kind {
     Text,
     /// A single http(s) URL and nothing else.

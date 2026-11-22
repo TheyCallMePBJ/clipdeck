@@ -9,7 +9,8 @@ use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
 use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, Backend, Mode, Status};
-use crate::entry::{Entry, Kind};
+use crate::entry::Kind;
+use crate::item::Item;
 use crate::preview::Content;
 use crate::search::Match;
 
@@ -44,17 +45,17 @@ fn draw_list<B: Backend>(frame: &mut Frame, app: &mut App<B>, list_area: Rect) {
     let block = Block::bordered().title(" clipdeck ");
 
     if app.match_count() == 0 {
-        let message = if app.entries().is_empty() {
+        let message = if app.items().is_empty() {
             "clipboard history is empty"
         } else {
             "no matches"
         };
         frame.render_widget(Paragraph::new(message.dim()).block(block), list_area);
     } else {
-        let (entries, matches, state) = app.list_view();
+        let (items, matches, state) = app.list_view();
         let items: Vec<ListItem> = matches
             .iter()
-            .map(|m| entry_item(&entries[m.index], m))
+            .map(|m| list_item(&items[m.index], m))
             .collect();
         let list = List::new(items)
             .block(block)
@@ -66,12 +67,12 @@ fn draw_list<B: Backend>(frame: &mut Frame, app: &mut App<B>, list_area: Rect) {
 
 fn draw_preview<B: Backend>(frame: &mut Frame, app: &mut App<B>, area: Rect) {
     let block = Block::bordered();
-    let Some((entry, content, scroll)) = app.preview_view() else {
+    let Some((item, content, scroll)) = app.preview_view() else {
         // Nothing selected (empty history or no matches).
         frame.render_widget(block.title(" preview "), area);
         return;
     };
-    let block = block.title(preview_title(entry, content.as_deref()));
+    let block = block.title(preview_title(item, content.as_deref()));
 
     match content {
         None => {
@@ -114,33 +115,46 @@ fn draw_preview<B: Backend>(frame: &mut Frame, app: &mut App<B>, area: Rect) {
     }
 }
 
-/// E.g. " text · 12 lines · 1.4 KiB " or " png 2560x1440 · 2 MiB ".
-fn preview_title(entry: &Entry, content: Option<&Content>) -> String {
-    let kind = match &entry.kind {
-        Kind::Text => "text",
-        Kind::Url => "url",
-        Kind::Image {
-            format,
-            width,
-            height,
-            size,
-        } => return format!(" {format} {width}x{height} · {size} "),
-    };
-    match content {
-        Some(Content::Text {
-            lines,
-            bytes,
-            truncated,
-        }) => {
+/// E.g. " text · 12 lines · 1.4 KiB " or " png 2560x1440 · 2 MiB · pinned ".
+fn preview_title(item: &Item, content: Option<&Content>) -> String {
+    let details = match (item.kind(), content) {
+        (
+            Kind::Image {
+                format,
+                width,
+                height,
+                size,
+            },
+            _,
+        ) => format!("{format} {width}x{height} · {size}"),
+        (
+            kind,
+            Some(Content::Text {
+                lines,
+                bytes,
+                truncated,
+            }),
+        ) => {
             let count = lines.len();
             let plural = if count == 1 { "" } else { "s" };
             let more = if *truncated { " (truncated)" } else { "" };
             format!(
-                " {kind} · {count} line{plural}{more} · {} ",
+                "{} · {count} line{plural}{more} · {}",
+                kind_name(kind),
                 human_size(*bytes)
             )
         }
-        _ => format!(" {kind} "),
+        (kind, _) => kind_name(kind).to_owned(),
+    };
+    let pinned = if item.is_pinned() { " · pinned" } else { "" };
+    format!(" {details}{pinned} ")
+}
+
+fn kind_name(kind: &Kind) -> &'static str {
+    match kind {
+        Kind::Text => "text",
+        Kind::Url => "url",
+        Kind::Image { .. } => "image",
     }
 }
 
@@ -175,8 +189,9 @@ fn draw_search_line<B: Backend>(frame: &mut Frame, app: &App<B>, area: Rect) {
 }
 
 /// One list row, with the characters that matched the query highlighted.
-fn entry_item(e: &Entry, m: &Match) -> ListItem<'static> {
-    let base = match e.kind {
+/// Pinned rows start with a star.
+fn list_item(item: &Item, m: &Match) -> ListItem<'static> {
+    let base = match item.kind() {
         Kind::Text => Style::new(),
         Kind::Url => Style::new().fg(Color::Cyan).underlined(),
         Kind::Image { .. } => Style::new().italic(),
@@ -188,10 +203,13 @@ fn entry_item(e: &Entry, m: &Match) -> ListItem<'static> {
     // highlights can drift on text with combining characters (e.g. some
     // emoji). Plain text is unaffected.
     let mut spans = Vec::new();
+    if item.is_pinned() {
+        spans.push(Span::styled("★ ", Style::new().fg(Color::Yellow)));
+    }
     let mut run = String::new();
     let mut run_highlighted = false;
     let mut next_highlight = m.highlights.iter().peekable();
-    for (i, ch) in e.label.chars().enumerate() {
+    for (i, ch) in item.label().chars().enumerate() {
         let highlighted = next_highlight.next_if_eq(&&(i as u32)).is_some();
         if highlighted != run_highlighted && !run.is_empty() {
             let style = if run_highlighted { highlight } else { base };
@@ -212,7 +230,7 @@ fn status_line<B: Backend>(app: &App<B>) -> Line<'static> {
         Some(Status::Prompt(msg)) => Line::from(format!(" {msg}")).fg(Color::Yellow),
         Some(Status::Error(msg)) => Line::from(format!(" error: {msg}")).fg(Color::Red),
         None => {
-            let total = app.entries().len();
+            let total = app.items().len();
             let shown = app.match_count();
             let mut position = if shown == 0 {
                 "0/0".to_owned()
@@ -224,7 +242,7 @@ fn status_line<B: Backend>(app: &App<B>) -> Line<'static> {
             }
             let keys = match app.mode() {
                 Mode::Normal => {
-                    "j/k move · J/K scroll · enter copy · f search · dd delete · q quit"
+                    "j/k move · J/K scroll · enter copy · f search · p pin · dd delete · q quit"
                 }
                 Mode::Search => "type to filter · ↑/↓ move · enter copy · esc done",
             };
@@ -241,13 +259,21 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
+    use crate::entry::Entry;
+
     struct Fixed(Vec<Entry>);
 
     impl Backend for Fixed {
         fn list(&self) -> Result<Vec<Entry>> {
             Ok(self.0.clone())
         }
+        fn decode(&self, entry: &Entry) -> Result<Vec<u8>> {
+            Ok(entry.preview.clone().into_bytes())
+        }
         fn delete(&mut self, _: &Entry) -> Result<()> {
+            Ok(())
+        }
+        fn store(&mut self, _: &[u8]) -> Result<()> {
             Ok(())
         }
     }
@@ -275,9 +301,10 @@ mod tests {
             "2\t[[ binary data 2 MiB png 2560x1440 ]]",
             "1\thttps://example.com",
         ];
-        App::new(Fixed(
-            lines.iter().filter_map(|l| Entry::parse(l)).collect(),
-        ))
+        App::new(
+            Fixed(lines.iter().filter_map(|l| Entry::parse(l)).collect()),
+            None,
+        )
         .unwrap()
     }
 
@@ -328,7 +355,7 @@ mod tests {
         let mut app = app();
         assert!(render_wide(&mut app).contains("loading…"));
         app.preview_loaded(crate::preview::Loaded {
-            id: 3,
+            id: crate::item::ItemId::History(3),
             content: crate::preview::text_content(b"git push --force-with-lease\nsecond line"),
         });
         let screen = render_wide(&mut app);
@@ -340,8 +367,22 @@ mod tests {
     #[test]
     fn preview_title_for_images_uses_entry_info() {
         let app = app();
-        let image = &app.entries()[1];
+        let image = &app.items()[1];
         assert_eq!(preview_title(image, None), " png 2560x1440 · 2 MiB ");
+    }
+
+    #[test]
+    fn pinned_rows_have_a_star_and_title() {
+        let dir = crate::pins::tests::temp_dir();
+        let mut pins = crate::pins::Pins::load(dir.0.clone()).unwrap();
+        let pinned = Entry::parse("3\tgit push").unwrap();
+        pins.add(b"git push", &pinned).unwrap();
+        let mut app = App::new(Fixed(vec![pinned]), Some(pins)).unwrap();
+
+        let screen = render_wide(&mut app);
+        assert!(screen.contains("> ★ git push"), "{screen}");
+        assert_eq!(app.items().len(), 1, "shown once, as a pin");
+        assert_eq!(preview_title(&app.items()[0], None), " text · pinned ");
     }
 
     #[test]
