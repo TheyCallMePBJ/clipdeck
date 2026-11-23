@@ -140,9 +140,8 @@ mod tests {
     #[test]
     #[ignore = "needs the cliphist binary"]
     fn list_and_delete_against_real_cliphist() {
-        let dir = std::env::temp_dir().join(format!("clipdeck-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut backend = Cliphist::new(Some(dir.join("db")));
+        let dir = crate::testutil::temp_dir();
+        let mut backend = Cliphist::new(Some(dir.0.join("db")));
 
         for text in ["first", "second", "third"] {
             backend.store(text.as_bytes()).unwrap();
@@ -169,7 +168,5 @@ mod tests {
 
         backend.wipe().unwrap();
         assert!(backend.list().unwrap().is_empty());
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

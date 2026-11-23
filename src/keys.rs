@@ -100,6 +100,22 @@ pub struct Key {
 }
 
 impl Key {
+    /// A key pressed without modifiers, e.g. `Key::plain(KeyCode::Esc)`.
+    pub const fn plain(code: KeyCode) -> Self {
+        Self {
+            code,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Ctrl plus a (lowercase) letter.
+    pub const fn ctrl(c: char) -> Self {
+        Self {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::CONTROL,
+        }
+    }
+
     fn new(code: KeyCode, modifiers: KeyModifiers) -> Self {
         let mut modifiers =
             modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
@@ -158,9 +174,8 @@ impl Key {
         let code = match (chars.next(), chars.next()) {
             (None, _) => bail!("key {text:?} has no key after the modifiers"),
             (Some(c), None) => KeyCode::Char(c),
-            _ => named_key(key_text).ok_or_else(|| {
-                anyhow::anyhow!("unknown key {key_text:?} in {text:?}")
-            })?,
+            _ => named_key(key_text)
+                .ok_or_else(|| anyhow::anyhow!("unknown key {key_text:?} in {text:?}"))?,
         };
         Ok(Self::new(code, modifiers))
     }
@@ -259,7 +274,10 @@ impl Keymap {
     /// default command had it, so rebinding `d` doesn't mean also having to
     /// unbind it from `delete`. Two of the user's own commands sharing a key
     /// is an error, since only one of them could run.
-    pub fn build(defaults: &[(String, Vec<String>)], user: &[(String, Vec<String>)]) -> Result<Self> {
+    pub fn build(
+        defaults: &[(String, Vec<String>)],
+        user: &[(String, Vec<String>)],
+    ) -> Result<Self> {
         let mut keys: Vec<Vec<Key>> = vec![Vec::new(); Command::ALL.len()];
         for (name, list) in defaults {
             keys[command(name)?.index()] = parse_all(list)?;
@@ -366,19 +384,38 @@ mod tests {
         assert_eq!(key("G"), event(KeyCode::Char('G'), KeyModifiers::SHIFT));
         assert_eq!(key("G"), event(KeyCode::Char('G'), KeyModifiers::NONE));
         assert_eq!(key("shift+g"), key("G"));
-        assert_eq!(key("ctrl+d"), event(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(
+            key("ctrl+d"),
+            event(KeyCode::Char('d'), KeyModifiers::CONTROL)
+        );
         assert_eq!(key("Space"), event(KeyCode::Char(' '), KeyModifiers::NONE));
-        assert_eq!(key("shift+Tab"), event(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(
+            key("shift+Tab"),
+            event(KeyCode::BackTab, KeyModifiers::SHIFT)
+        );
         assert_eq!(key("shift+Down"), event(KeyCode::Down, KeyModifiers::SHIFT));
         assert_eq!(key("PageDown"), key("pgdn"));
         assert_eq!(key("F5"), event(KeyCode::F(5), KeyModifiers::NONE));
         assert_eq!(key("+"), event(KeyCode::Char('+'), KeyModifiers::NONE));
-        assert_eq!(key("ctrl++"), event(KeyCode::Char('+'), KeyModifiers::CONTROL));
+        assert_eq!(
+            key("ctrl++"),
+            event(KeyCode::Char('+'), KeyModifiers::CONTROL)
+        );
     }
 
     #[test]
     fn displays_like_the_config_spells_it() {
-        for text in ["j", "G", "?", "ctrl+d", "Space", "Enter", "shift+Tab", "shift+Down", "F5"] {
+        for text in [
+            "j",
+            "G",
+            "?",
+            "ctrl+d",
+            "Space",
+            "Enter",
+            "shift+Tab",
+            "shift+Down",
+            "F5",
+        ] {
             assert_eq!(key(text).to_string(), text);
         }
     }

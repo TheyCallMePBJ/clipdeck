@@ -167,6 +167,13 @@ pub fn thumbnail(bytes: &[u8], cache_dir: Option<&Path>) -> Result<DynamicImage>
     if let Some(path) = &cache_path
         && let Ok(image) = image::open(path)
     {
+        // Pruning removes the least recently *modified* files, so mark this
+        // one as just used. Otherwise a thumbnail viewed every day would be
+        // pruned as if it were old.
+        let _ = fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|f| f.set_modified(std::time::SystemTime::now()));
         return Ok(image);
     }
 
@@ -222,6 +229,7 @@ pub fn default_thumbs_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::temp_dir;
     use image::{Rgb, RgbImage};
     use std::io::Cursor;
     use std::time::Duration;
@@ -233,13 +241,6 @@ mod tests {
             .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .unwrap();
         bytes
-    }
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("clipdeck-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     fn text_lines(content: Content) -> (Vec<String>, bool) {
@@ -285,7 +286,8 @@ mod tests {
 
     #[test]
     fn large_images_are_shrunk_and_cached() {
-        let dir = temp_dir("thumbs");
+        let tmp = temp_dir();
+        let dir = tmp.0.clone();
         let bytes = png(2048, 1024);
 
         let thumb = thumbnail(&bytes, Some(&dir)).unwrap();
@@ -297,8 +299,29 @@ mod tests {
         let again = thumbnail(&bytes, Some(&dir)).unwrap();
         assert_eq!((again.width(), again.height()), (1024, 512));
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+    }
 
-        fs::remove_dir_all(&dir).unwrap();
+    #[test]
+    fn using_a_cached_thumbnail_keeps_it_from_being_pruned() {
+        let tmp = temp_dir();
+        let dir = tmp.0.clone();
+        let bytes = png(20, 20);
+        thumbnail(&bytes, Some(&dir)).unwrap();
+        let path = fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        thumbnail(&bytes, Some(&dir)).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(
+            modified > long_ago,
+            "a cache hit marks the file as recently used"
+        );
     }
 
     #[test]
@@ -314,7 +337,8 @@ mod tests {
 
     #[test]
     fn prune_keeps_newest_files() {
-        let dir = temp_dir("prune");
+        let tmp = temp_dir();
+        let dir = tmp.0.clone();
         for i in 0..5 {
             fs::write(dir.join(format!("{i}.png")), b"x").unwrap();
             // Distinct modification times.
@@ -327,7 +351,6 @@ mod tests {
             .collect();
         left.sort();
         assert_eq!(left, ["3.png", "4.png"]);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     fn history_request(line: &str) -> Request {
@@ -341,7 +364,8 @@ mod tests {
 
     #[test]
     fn loader_reads_files_for_pins() {
-        let dir = temp_dir("pin-preview");
+        let tmp = temp_dir();
+        let dir = tmp.0.clone();
         let path = dir.join("content");
         fs::write(&path, b"pinned text").unwrap();
         let (events, received) = mpsc::channel();
@@ -366,7 +390,6 @@ mod tests {
             }
             _ => panic!("unexpected event"),
         }
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

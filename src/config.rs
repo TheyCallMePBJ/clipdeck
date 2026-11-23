@@ -79,7 +79,7 @@ pub struct Config {
     pub theme: Theme,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
     pub accent: Color,
     pub pin: Color,
@@ -172,8 +172,9 @@ impl Config {
     /// Reads the config at `path`. A missing file gives the defaults.
     pub fn load(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
-            Ok(text) => Self::parse(DEFAULT_CONFIG, &text)
-                .with_context(|| format!("in {}", path.display())),
+            Ok(text) => {
+                Self::parse(DEFAULT_CONFIG, &text).with_context(|| format!("in {}", path.display()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("can't read {}", path.display())),
         }
@@ -197,12 +198,11 @@ impl Config {
         let keymap = Keymap::build(&default_keys, &user_keys)?;
 
         // The user's color if given, otherwise the default one.
-        let pick = |user: Option<String>, default: Option<String>, name: &str| {
-            match user.or(default) {
+        let pick =
+            |user: Option<String>, default: Option<String>, name: &str| match user.or(default) {
                 Some(text) => parse_color(&text, name).map(Some),
                 None => Ok(None),
-            }
-        };
+            };
         let required = |user, default, name: &str| -> Result<Color> {
             Ok(pick(user, default, name)?.unwrap_or(Color::Reset))
         };
@@ -299,7 +299,10 @@ pub mod tests {
         assert!(user("[colours]\npin = \"red\"").is_err());
         assert!(user("[colors]\npinn = \"red\"").is_err());
         let err = format!("{:#}", user("[colors]\npin = \"reddish\"").unwrap_err());
-        assert!(err.contains("colors.pin: unknown color \"reddish\""), "{err}");
+        assert!(
+            err.contains("colors.pin: unknown color \"reddish\""),
+            "{err}"
+        );
         assert!(user("[keys]\npin = \"hyper+p\"").is_err());
         assert!(user("[keys]\npin = 3").is_err());
     }

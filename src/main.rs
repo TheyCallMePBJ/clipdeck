@@ -10,6 +10,8 @@ mod pins;
 mod preview;
 mod sanitize;
 mod search;
+#[cfg(test)]
+mod testutil;
 mod tty;
 mod ui;
 mod watch;

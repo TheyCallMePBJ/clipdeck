@@ -137,15 +137,9 @@ fn is_write(kind: &EventKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::temp_dir;
     use std::collections::HashMap;
     use std::sync::mpsc::Receiver;
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("clipdeck-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
     fn resolve(vars: &[(&str, &str)]) -> Option<PathBuf> {
         let vars: HashMap<String, String> = vars
@@ -188,7 +182,8 @@ mod tests {
 
     #[test]
     fn config_file_beats_env_var() {
-        let dir = temp_dir("config");
+        let tmp = temp_dir();
+        let dir = tmp.0.clone();
         let config = dir.join("config");
         fs::write(&config, "# comment\nmax-items 500\ndb-path /from/config\n").unwrap();
         let config = config.to_str().unwrap();
@@ -208,12 +203,12 @@ mod tests {
             resolve(&[("XDG_CONFIG_HOME", dir.to_str().unwrap())]),
             Some(PathBuf::from("/xdg/db"))
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn config_without_db_path_is_ignored() {
-        let dir = temp_dir("config-no-db");
+        let tmp = temp_dir();
+        let dir = tmp.0.clone();
         let config = dir.join("config");
         // cliphist doesn't accept key=value, so neither do we.
         fs::write(&config, "db-path=/nope\n").unwrap();
@@ -224,7 +219,6 @@ mod tests {
             ]),
             Some(PathBuf::from("/h/.cache/cliphist/db"))
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     fn changed_within(events: &Receiver<Event>, timeout: Duration) -> bool {
@@ -233,7 +227,8 @@ mod tests {
 
     #[test]
     fn reports_writes_once_and_ignores_reads_and_other_files() {
-        let dir = temp_dir("watch");
+        let tmp = temp_dir();
+        let dir = tmp.0.clone();
         let db = dir.join("db");
         fs::write(&db, b"v1").unwrap();
 
@@ -251,8 +246,6 @@ mod tests {
         fs::read(&db).unwrap();
         fs::write(dir.join("other"), b"x").unwrap();
         assert!(!changed_within(&received, Duration::from_millis(300)));
-
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Runs real cliphist commands against a watched database.
@@ -264,7 +257,8 @@ mod tests {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
-        let dir = temp_dir("watch-cliphist");
+        let tmp = temp_dir();
+        let dir = tmp.0.clone();
         let db = dir.join("db");
         let store = |text: &str| {
             let mut child = Command::new("cliphist")
@@ -293,7 +287,5 @@ mod tests {
 
         store("second");
         assert!(changed_within(&received, Duration::from_secs(2)));
-
-        fs::remove_dir_all(&dir).unwrap();
     }
 }

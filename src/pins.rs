@@ -185,28 +185,9 @@ pub fn default_dir() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// A temporary directory, deleted when this value is dropped.
-    pub struct TempDir(pub PathBuf);
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// A fresh, empty directory for one test.
-    pub fn temp_dir() -> TempDir {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("clipdeck-pins-{}-{n}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        TempDir(dir)
-    }
+    use crate::testutil::temp_dir;
 
     fn entry(id: u64, text: &str) -> Entry {
         Entry::parse(&format!("{id}\t{text}")).unwrap()

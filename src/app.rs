@@ -5,12 +5,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::{Context, Result};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::ListState;
 
+use crate::config::{Config, Theme};
 use crate::entry::{Entry, Kind};
 use crate::item::{Item, ItemId};
-use crate::config::{Config, Theme};
 use crate::keys::{Command, Key, Keymap};
 use crate::pins::{self, Pins};
 use crate::preview::{Content, Loaded, Request, Source};
@@ -282,7 +282,9 @@ impl<B: Backend> App<B> {
 
     /// The key to press for `command`, for prompts like "press d again".
     fn key_name(&self, command: Command) -> String {
-        self.keymap.first(command).unwrap_or_else(|| command.name().to_owned())
+        self.keymap
+            .first(command)
+            .unwrap_or_else(|| command.name().to_owned())
     }
 
     pub fn show_error(&mut self, message: String) {
@@ -315,10 +317,10 @@ impl<B: Backend> App<B> {
         // Taking it here means any key other than the confirming one
         // cancels a pending delete or wipe.
         let pending = self.pending.take();
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let key = Key::from_event(key);
 
         // Always quits, whatever the config says, so there's a way out.
-        if ctrl && key.code == KeyCode::Char('c') {
+        if key == Key::ctrl('c') {
             return Action::Quit;
         }
         // While the help screen is open, any key just closes it.
@@ -326,7 +328,6 @@ impl<B: Backend> App<B> {
             self.help = false;
             return Action::None;
         }
-        let key = Key::from_event(key);
         if self.mode == Mode::Search && self.search_key(key) {
             return Action::None;
         }
@@ -339,20 +340,20 @@ impl<B: Backend> App<B> {
     /// Handles the keys that edit the query. Returns false for any other
     /// key, which then runs its bound command as in the list.
     fn search_key(&mut self, key: Key) -> bool {
-        if key == Key::parse("Esc").expect("valid key") {
+        if key == Key::plain(KeyCode::Esc) {
             // Leave search mode but keep the filter, so the results can be
             // browsed with the normal keys (and entries deleted).
             self.mode = Mode::Normal;
-        } else if key == Key::parse("Backspace").expect("valid key") {
+        } else if key == Key::plain(KeyCode::Backspace) {
             if self.query.pop().is_some() {
                 self.refilter_from_top();
             } else {
                 self.mode = Mode::Normal;
             }
-        } else if key == Key::parse("ctrl+u").expect("valid key") {
+        } else if key == Key::ctrl('u') {
             self.query.clear();
             self.refilter_from_top();
-        } else if key == Key::parse("ctrl+w").expect("valid key") {
+        } else if key == Key::ctrl('w') {
             delete_last_word(&mut self.query);
             self.refilter_from_top();
         } else if let Some(c) = key.plain_char() {
@@ -825,8 +826,9 @@ fn delete_last_word(query: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pins::tests::{TempDir, temp_dir};
+    use crate::testutil::{TempDir, temp_dir};
     use anyhow::bail;
+    use ratatui::crossterm::event::KeyModifiers;
 
     /// In-memory backend. Tests edit `entries` directly to simulate
     /// cliphist changing underneath the app.

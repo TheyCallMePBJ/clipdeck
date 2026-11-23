@@ -10,9 +10,9 @@ use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, Backend, Mode, Status};
 use crate::config::Theme;
-use crate::keys::{Command, Key, Keymap};
 use crate::entry::Kind;
 use crate::item::Item;
+use crate::keys::{Command, Key, Keymap};
 use crate::preview::Content;
 use crate::search::Match;
 
@@ -49,17 +49,29 @@ pub fn draw<B: Backend>(frame: &mut Frame, app: &mut App<B>) {
 /// keys side by side, as in `j/k`) and what they do.
 const HELP: &[(&[Command], &str)] = &[
     (&[Command::Down, Command::Up], "move"),
-    (&[Command::HalfPageDown, Command::HalfPageUp], "half page down / up"),
+    (
+        &[Command::HalfPageDown, Command::HalfPageUp],
+        "half page down / up",
+    ),
     (&[Command::PageDown, Command::PageUp], "page down / up"),
     (&[Command::Top, Command::Bottom], "top / bottom"),
-    (&[Command::PreviewDown, Command::PreviewUp], "scroll the preview"),
+    (
+        &[Command::PreviewDown, Command::PreviewUp],
+        "scroll the preview",
+    ),
     (&[Command::Select], "{enter} and close"),
     (&[Command::Search], "search"),
     (&[Command::Pin], "pin / unpin"),
     (&[Command::Mark], "mark (to delete several)"),
-    (&[Command::Delete], "press twice: delete (the marked, if any)"),
+    (
+        &[Command::Delete],
+        "press twice: delete (the marked, if any)",
+    ),
     (&[Command::Wipe], "press twice: wipe history (pins kept)"),
-    (&[Command::NextType, Command::PreviousType], "show all / text / images / URLs"),
+    (
+        &[Command::NextType, Command::PreviousType],
+        "show all / text / images / URLs",
+    ),
     (&[Command::Reload], "reload"),
     (&[Command::Help], "this help"),
     (&[Command::Back], "clear marks, search, type; then quit"),
@@ -72,7 +84,10 @@ const SEARCH_HELP: &[(&str, &str)] = &[
     ("Backspace", "delete a character"),
     ("ctrl+w  ctrl+u", "delete word / clear"),
     ("Esc", "back to the list, keeping the filter"),
-    ("other keys", "as in the list (Enter, arrows, Tab, ctrl+...)"),
+    (
+        "other keys",
+        "as in the list (Enter, arrows, Tab, ctrl+...)",
+    ),
 ];
 
 /// The keys of a help row: each command's keys side by side, so `j`, `k`
@@ -154,7 +169,7 @@ fn draw_list<B: Backend>(frame: &mut Frame, app: &mut App<B>, list_area: Rect) {
         Some(label) => format!(" clipdeck · {label} "),
         None => " clipdeck ".to_owned(),
     };
-    let theme = app.theme().clone();
+    let theme = *app.theme();
     let block = border(&theme).title(title);
 
     if app.match_count() == 0 {
@@ -182,7 +197,7 @@ fn draw_list<B: Backend>(frame: &mut Frame, app: &mut App<B>, list_area: Rect) {
 }
 
 fn draw_preview<B: Backend>(frame: &mut Frame, app: &mut App<B>, area: Rect) {
-    let theme = app.theme().clone();
+    let theme = *app.theme();
     let block = border(&theme);
     let Some((item, content, scroll)) = app.preview_view() else {
         // Nothing selected (empty history or no matches).
@@ -541,7 +556,7 @@ mod tests {
 
     #[test]
     fn pinned_rows_have_a_star_and_title() {
-        let dir = crate::pins::tests::temp_dir();
+        let dir = crate::testutil::temp_dir();
         let mut pins = crate::pins::Pins::load(dir.0.clone()).unwrap();
         let pinned = Entry::parse("3\tgit push").unwrap();
         pins.add(b"git push", &pinned).unwrap();
@@ -586,7 +601,10 @@ mod tests {
             .collect();
         assert!(screen.contains(" keys "), "{screen}");
         assert!(screen.contains("j/k  Down/Up  ctrl+n/ctrl+p"), "{screen}");
-        assert!(screen.contains("press twice: wipe history (pins kept)"), "{screen}");
+        assert!(
+            screen.contains("press twice: wipe history (pins kept)"),
+            "{screen}"
+        );
         assert!(screen.contains("press any key to close"), "{screen}");
     }
 
@@ -605,7 +623,10 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
-        assert_eq!(terminal.backend().buffer()[(0, 1)].fg, ratatui::style::Color::Blue);
+        assert_eq!(
+            terminal.backend().buffer()[(0, 1)].fg,
+            ratatui::style::Color::Blue
+        );
 
         app.handle_key(KeyEvent::from(KeyCode::Char('x')));
         assert!(render_at(&mut app, 100, 8).contains("press x again to delete"));
