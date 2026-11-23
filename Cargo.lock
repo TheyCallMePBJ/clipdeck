@@ -304,6 +304,7 @@ dependencies = [
  "clap",
  "directories",
  "image",
+ "libc",
  "notify",
  "nucleo-matcher",
  "ratatui",

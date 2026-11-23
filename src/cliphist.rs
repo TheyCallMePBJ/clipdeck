@@ -32,11 +32,6 @@ impl Cliphist {
         cmd.arg(subcommand);
         cmd
     }
-
-    /// Decodes the entry and puts it on the clipboard.
-    pub fn copy(&self, entry: &Entry) -> Result<()> {
-        wl_copy(&self.decode(entry)?)
-    }
 }
 
 /// Puts `data` on the clipboard with `wl-copy`.

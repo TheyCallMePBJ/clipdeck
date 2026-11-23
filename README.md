@@ -30,19 +30,22 @@ straight through cliphist.
   Mark several entries with `Space` first to delete them together.
 - **Wipe** (`WW`): clear cliphist's history from clipdeck. Pins are kept.
 - **Enter** copies the entry and exits.
+- **Paste** (`--paste`): after copying, paste into the window underneath
+  with `wtype`, so choosing an entry types it where you were.
+- **Pick** (`--pick`): print the chosen entry to stdout instead, for
+  scripts (`clipdeck --pick | ...`). Exits with 130 if nothing was chosen.
 - **Live reload** when history changes while the popup is open.
 - Vim-style keys plus arrow keys. Press `?` for the full list.
 
 ## Planned
 
-- Paste the entry straight into the previous window via `wtype`
 - Configurable keybinds and colors
-- `--pick` mode: print the selected entry to stdout, for use in scripts
 
 ## Requirements
 
 - A Wayland compositor (developed on Hyprland)
 - `cliphist` and `wl-clipboard` (`wl-copy`, `wl-paste`)
+- `wtype`, only for `--paste`
 - A terminal with the kitty graphics protocol for image previews (Ghostty,
   kitty, WezTerm). Other terminals fall back to a
   lower-resolution preview drawn with block characters.
@@ -92,6 +95,12 @@ hl.window_rule({
   dim_around   = true,  -- optional
 })
 ```
+
+To paste the entry where you were, instead of only copying it, add
+`--paste` to the command. It presses `ctrl+v` in the window underneath once
+the popup closes. Terminals usually paste with `ctrl+shift+v`, which you can
+pass as `--paste=ctrl+shift+v` (the `=` is required). Named keys work
+too, as in `--paste=shift+Insert`.
 
 Static rules such as `float`, `center` and `size` are matched against the
 window's *initial* title, so the title has to be set at launch with
@@ -166,9 +175,9 @@ clipdeck stores no history of its own, only pins.
 - [x] **Preview pane**: full text, image thumbnails, and the thumbnail cache.
 - [x] **Live reload**: watching cliphist's database with `notify`.
 - [x] **Pins**: hash-keyed pin store and a pinned section at the top.
-- [ ] **Polish** (in progress): multi-select delete, wipe with confirmation
-  a help screen and type filters are done; `--pick`, `wtype` paste, and
-  configurable keybinds and colors are next.
+- [ ] **Polish** (in progress): multi-select delete, wipe with
+  confirmation, a help screen, type filters, `--pick` and `--paste` are
+  done; configurable keybinds and colors are next.
 - [ ] **Release**: README GIF (`vhs`), AUR package, crates.io.
 
 ## Non-goals

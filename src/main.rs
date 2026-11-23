@@ -3,14 +3,18 @@ mod cliphist;
 mod entry;
 mod event;
 mod item;
+mod paste;
 mod pins;
 mod preview;
 mod sanitize;
 mod search;
+mod tty;
 mod ui;
 mod watch;
 
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -39,6 +43,24 @@ struct Cli {
     /// (passed to cliphist as -db-path). Handy for testing.
     #[arg(long, value_name = "PATH")]
     db_path: Option<PathBuf>,
+
+    /// Print the chosen entry to stdout instead of copying it, for use in
+    /// scripts (`clipdeck --pick | ...`). Exits with status 130 if nothing
+    /// is chosen.
+    #[arg(long, conflicts_with = "paste")]
+    pick: bool,
+
+    /// After copying, paste into the window underneath by pressing KEYS
+    /// with `wtype`. Defaults to ctrl+v; terminals usually need
+    /// ctrl+shift+v.
+    #[arg(
+        long,
+        value_name = "KEYS",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = paste::DEFAULT_KEYS
+    )]
+    paste: Option<String>,
 }
 
 /// Starts watching cliphist's database for live reload. Returns the watcher,
@@ -64,9 +86,13 @@ fn start_watching(
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
     let start = Instant::now();
+    // Catch a bad shortcut now, rather than after an entry was chosen.
+    if let Some(keys) = &cli.paste {
+        paste::wtype_args(keys)?;
+    }
 
     let cliphist = Cliphist::new(cli.db_path.clone());
     // If the pins file can't be read, run without pins (and say so) rather
@@ -81,8 +107,16 @@ fn main() -> Result<()> {
     if let Some(message) = &pins_error {
         app.show_error(message.clone());
     }
+    if cli.pick {
+        app.set_enter_verb("print");
+    } else if cli.paste.is_some() {
+        app.set_enter_verb("paste");
+    }
     let listed = start.elapsed();
 
+    // With --pick, stdout may be a pipe. Draw on the terminal instead, and
+    // put stdout back (when this is dropped) before printing the entry.
+    let use_terminal = tty::UseTerminal::redirect()?;
     // ratatui::init also installs a panic hook that restores the terminal.
     let mut terminal = ratatui::init();
 
@@ -111,6 +145,10 @@ fn main() -> Result<()> {
     // Restore before looking at the result, so an error doesn't leave the
     // terminal in raw mode.
     ratatui::restore();
+    // Dropping the Terminal writes a "show cursor" escape, so it has to go
+    // before stdout is pointed back at a possible pipe.
+    drop(terminal);
+    drop(use_terminal);
 
     let (selected, first_frame) = result?;
     if cli.timing {
@@ -124,13 +162,32 @@ fn main() -> Result<()> {
             eprintln!("{message}");
         }
     }
-    // Copy after the terminal is restored so errors print cleanly.
-    match selected {
-        Some(CopySource::Entry(entry)) => cliphist.copy(&entry)?,
-        Some(CopySource::Bytes(bytes)) => cliphist::wl_copy(&bytes)?,
-        None => {}
+    // Act on the choice after the terminal is restored, so errors print
+    // cleanly.
+    let Some(selected) = selected else {
+        // 130 is what shells report for Ctrl+c, and what fzf uses when
+        // nothing was chosen. Scripts can tell "cancelled" from "picked".
+        return Ok(if cli.pick {
+            ExitCode::from(130)
+        } else {
+            ExitCode::SUCCESS
+        });
+    };
+    let bytes = match selected {
+        CopySource::Entry(entry) => cliphist.decode(&entry)?,
+        CopySource::Bytes(bytes) => bytes,
+    };
+    if cli.pick {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&bytes)?;
+        stdout.flush()?;
+    } else {
+        cliphist::wl_copy(&bytes)?;
+        if let Some(keys) = &cli.paste {
+            paste::spawn(keys)?;
+        }
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Runs the event loop. Returns the entry to copy (if any) and the time

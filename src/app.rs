@@ -171,6 +171,9 @@ pub struct App<B: Backend> {
     /// Preview scroll position, as (item, first visible line). Tied to the
     /// item so moving the selection starts the next preview at the top.
     preview_scroll: Option<(ItemId, usize)>,
+    /// What Enter does with the entry, for the help and status bar:
+    /// "copy", "paste" or "print". The work happens in `main` after exit.
+    enter_verb: &'static str,
 }
 
 impl<B: Backend> App<B> {
@@ -198,6 +201,7 @@ impl<B: Backend> App<B> {
             previews: VecDeque::new(),
             preview_requested: None,
             preview_scroll: None,
+            enter_verb: "copy",
         };
         app.rebuild_items();
         app.refilter_from_top();
@@ -245,6 +249,14 @@ impl<B: Backend> App<B> {
 
     pub fn help_open(&self) -> bool {
         self.help
+    }
+
+    pub fn enter_verb(&self) -> &'static str {
+        self.enter_verb
+    }
+
+    pub fn set_enter_verb(&mut self, verb: &'static str) {
+        self.enter_verb = verb;
     }
 
     pub fn show_error(&mut self, message: String) {

@@ -39,7 +39,7 @@ pub fn draw<B: Backend>(frame: &mut Frame, app: &mut App<B>) {
     frame.render_widget(status_line(app), status_area);
 
     if app.help_open() {
-        draw_help(frame);
+        draw_help(frame, app.enter_verb());
     }
 }
 
@@ -49,7 +49,7 @@ const HELP: &[Option<(&str, &str)>] = &[
     Some(("g/G  Home/End", "top / bottom")),
     Some(("Ctrl+d/u  PgDn/PgUp", "half page / page")),
     Some(("J/K  Shift+↑/↓", "scroll the preview")),
-    Some(("Enter", "copy and close")),
+    Some(("Enter", "{enter} and close")),
     Some(("f  /", "search")),
     Some(("p", "pin / unpin")),
     Some(("Space", "mark (to delete several)")),
@@ -64,17 +64,17 @@ const HELP: &[Option<(&str, &str)>] = &[
     Some(("↑/↓  Ctrl+n/p", "move")),
     Some(("Ctrl+w/u", "delete word / clear")),
     Some(("Tab  Shift+Tab", "show all / text / images / URLs")),
-    Some(("Enter", "copy and close")),
+    Some(("Enter", "{enter} and close")),
     Some(("Esc", "back to the list, keeping the filter")),
 ];
 
-fn draw_help(frame: &mut Frame) {
+fn draw_help(frame: &mut Frame, enter_verb: &str) {
     let mut lines = vec![Line::from(" in the list".bold())];
     for row in HELP {
         match row {
             Some((keys, action)) => lines.push(Line::from(vec![
                 format!("   {keys:<22}").fg(Color::Yellow),
-                (*action).into(),
+                action.replace("{enter}", enter_verb).into(),
             ])),
             None => {
                 lines.push(Line::raw(""));
@@ -309,15 +309,15 @@ fn status_line<B: Backend>(app: &App<B>) -> Line<'static> {
                 position.push_str(&format!(" of {total}"));
             }
             let marked = app.marked_count();
+            let verb = app.enter_verb();
             let keys = match app.mode() {
                 Mode::Normal if marked > 0 => {
                     format!("{marked} marked · space mark · dd delete marked · esc clear marks")
                 }
-                Mode::Normal => {
-                    "enter copy · f search · p pin · space mark · dd delete · ? help · q quit"
-                        .to_owned()
-                }
-                Mode::Search => "type to filter · ↑/↓ move · enter copy · esc done".to_owned(),
+                Mode::Normal => format!(
+                    "enter {verb} · f search · p pin · space mark · dd delete · ? help · q quit"
+                ),
+                Mode::Search => format!("type to filter · ↑/↓ move · enter {verb} · esc done"),
             };
             Line::from(format!(" {position} · {keys}")).dim()
         }
@@ -391,6 +391,15 @@ mod tests {
         assert!(screen.contains("> git push"), "{screen}");
         assert!(screen.contains("[image] png 2560x1440 · 2 MiB"), "{screen}");
         assert!(screen.contains("1/3 · enter copy"), "{screen}");
+    }
+
+    #[test]
+    fn enter_label_follows_the_mode() {
+        let mut app = app();
+        app.set_enter_verb("paste");
+        assert!(render(&mut app).contains("1/3 · enter paste"));
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+        assert!(render(&mut app).contains("paste and close"));
     }
 
     #[test]
