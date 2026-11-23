@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, Backend, Mode, Status};
@@ -37,6 +37,61 @@ pub fn draw<B: Backend>(frame: &mut Frame, app: &mut App<B>) {
     }
 
     frame.render_widget(status_line(app), status_area);
+
+    if app.help_open() {
+        draw_help(frame);
+    }
+}
+
+/// Every key, as (keys, what they do). `None` starts a new section.
+const HELP: &[Option<(&str, &str)>] = &[
+    Some(("j/k  ↑/↓", "move")),
+    Some(("g/G  Home/End", "top / bottom")),
+    Some(("Ctrl+d/u  PgDn/PgUp", "half page / page")),
+    Some(("J/K  Shift+↑/↓", "scroll the preview")),
+    Some(("Enter", "copy and close")),
+    Some(("f  /", "search")),
+    Some(("p", "pin / unpin")),
+    Some(("Space", "mark (to delete several)")),
+    Some(("dd", "delete (the marked entries, if any)")),
+    Some(("WW", "wipe history (pins are kept)")),
+    Some(("r", "reload")),
+    Some(("Esc", "clear marks, then filter, then quit")),
+    Some(("q  Ctrl+c", "quit")),
+    None,
+    Some(("typing", "filter: 'exact ^prefix suffix$ !not")),
+    Some(("↑/↓  Ctrl+n/p", "move")),
+    Some(("Ctrl+w/u", "delete word / clear")),
+    Some(("Enter", "copy and close")),
+    Some(("Esc", "back to the list, keeping the filter")),
+];
+
+fn draw_help(frame: &mut Frame) {
+    let mut lines = vec![Line::from(" in the list".bold())];
+    for row in HELP {
+        match row {
+            Some((keys, action)) => lines.push(Line::from(vec![
+                format!("   {keys:<22}").fg(Color::Yellow),
+                (*action).into(),
+            ])),
+            None => {
+                lines.push(Line::raw(""));
+                lines.push(Line::from(" while searching".bold()));
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(" press any key to close".dim()));
+
+    let width = 64.min(frame.area().width);
+    let height = (lines.len() as u16 + 2).min(frame.area().height);
+    let area = frame
+        .area()
+        .centered(Constraint::Length(width), Constraint::Length(height));
+    // Clear first, so the list underneath doesn't show through.
+    frame.render_widget(Clear, area);
+    let help = Paragraph::new(lines).block(Block::bordered().title(" keys "));
+    frame.render_widget(help, area);
 }
 
 fn draw_list<B: Backend>(frame: &mut Frame, app: &mut App<B>, list_area: Rect) {
@@ -52,10 +107,13 @@ fn draw_list<B: Backend>(frame: &mut Frame, app: &mut App<B>, list_area: Rect) {
         };
         frame.render_widget(Paragraph::new(message.dim()).block(block), list_area);
     } else {
-        let (items, matches, state) = app.list_view();
+        let (items, matches, marked, state) = app.list_view();
         let items: Vec<ListItem> = matches
             .iter()
-            .map(|m| list_item(&items[m.index], m))
+            .map(|m| {
+                let item = &items[m.index];
+                list_item(item, m, marked.contains(&item.id()))
+            })
             .collect();
         let list = List::new(items)
             .block(block)
@@ -189,8 +247,8 @@ fn draw_search_line<B: Backend>(frame: &mut Frame, app: &App<B>, area: Rect) {
 }
 
 /// One list row, with the characters that matched the query highlighted.
-/// Pinned rows start with a star.
-fn list_item(item: &Item, m: &Match) -> ListItem<'static> {
+/// Marked rows start with a dot and pinned rows with a star.
+fn list_item(item: &Item, m: &Match, marked: bool) -> ListItem<'static> {
     let base = match item.kind() {
         Kind::Text => Style::new(),
         Kind::Url => Style::new().fg(Color::Cyan).underlined(),
@@ -203,6 +261,9 @@ fn list_item(item: &Item, m: &Match) -> ListItem<'static> {
     // highlights can drift on text with combining characters (e.g. some
     // emoji). Plain text is unaffected.
     let mut spans = Vec::new();
+    if marked {
+        spans.push(Span::styled("● ", Style::new().fg(Color::Magenta)));
+    }
     if item.is_pinned() {
         spans.push(Span::styled("★ ", Style::new().fg(Color::Yellow)));
     }
@@ -240,11 +301,16 @@ fn status_line<B: Backend>(app: &App<B>) -> Line<'static> {
             if shown != total {
                 position.push_str(&format!(" of {total}"));
             }
+            let marked = app.marked_count();
             let keys = match app.mode() {
-                Mode::Normal => {
-                    "j/k move · J/K scroll · enter copy · f search · p pin · dd delete · q quit"
+                Mode::Normal if marked > 0 => {
+                    format!("{marked} marked · space mark · dd delete marked · esc clear marks")
                 }
-                Mode::Search => "type to filter · ↑/↓ move · enter copy · esc done",
+                Mode::Normal => {
+                    "enter copy · f search · p pin · space mark · dd delete · ? help · q quit"
+                        .to_owned()
+                }
+                Mode::Search => "type to filter · ↑/↓ move · enter copy · esc done".to_owned(),
             };
             Line::from(format!(" {position} · {keys}")).dim()
         }
@@ -270,10 +336,13 @@ mod tests {
         fn decode(&self, entry: &Entry) -> Result<Vec<u8>> {
             Ok(entry.preview.clone().into_bytes())
         }
-        fn delete(&mut self, _: &Entry) -> Result<()> {
+        fn delete(&mut self, _: &[Entry]) -> Result<()> {
             Ok(())
         }
         fn store(&mut self, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        fn wipe(&mut self) -> Result<()> {
             Ok(())
         }
     }
@@ -314,7 +383,7 @@ mod tests {
         assert!(screen.contains("press f to search"), "{screen}");
         assert!(screen.contains("> git push"), "{screen}");
         assert!(screen.contains("[image] png 2560x1440 · 2 MiB"), "{screen}");
-        assert!(screen.contains("1/3 · j/k move"), "{screen}");
+        assert!(screen.contains("1/3 · enter copy"), "{screen}");
     }
 
     #[test]
@@ -390,6 +459,35 @@ mod tests {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(1536), "1.5 KiB");
         assert_eq!(human_size(3 * 1024 * 1024), "3.0 MiB");
+    }
+
+    #[test]
+    fn marked_rows_have_a_dot_and_status_counts_them() {
+        let mut app = app();
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        let screen = render_wide(&mut app);
+        assert!(screen.contains("● git push"), "{screen}");
+        assert!(screen.contains("1 marked"), "{screen}");
+    }
+
+    #[test]
+    fn help_screen_lists_keys() {
+        let mut app = app();
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..40)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(screen.contains(" keys "), "{screen}");
+        assert!(screen.contains("wipe history (pins are kept)"), "{screen}");
+        assert!(screen.contains("press any key to close"), "{screen}");
     }
 
     #[test]

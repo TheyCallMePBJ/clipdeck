@@ -5,7 +5,7 @@ use crate::pins::Pin;
 
 /// Identifies a row across reloads, for keeping the selection, caching
 /// previews and confirming deletes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ItemId {
     /// A cliphist id.
     History(u64),

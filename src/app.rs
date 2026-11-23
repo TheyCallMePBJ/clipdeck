@@ -23,9 +23,12 @@ const PREVIEW_CACHE: usize = 16;
 pub trait Backend {
     fn list(&self) -> Result<Vec<Entry>>;
     fn decode(&self, entry: &Entry) -> Result<Vec<u8>>;
-    fn delete(&mut self, entry: &Entry) -> Result<()>;
+    /// Deletes these entries from history, all in one go.
+    fn delete(&mut self, entries: &[Entry]) -> Result<()>;
     /// Adds `data` to history as the newest entry.
     fn store(&mut self, data: &[u8]) -> Result<()>;
+    /// Deletes all of history.
+    fn wipe(&mut self) -> Result<()>;
 }
 
 /// What the main loop should do after a key press.
@@ -52,6 +55,15 @@ pub enum Status {
     /// Waiting for the user to confirm something, e.g. a second `d`.
     Prompt(String),
     Error(String),
+}
+
+/// A destructive action waiting for its confirming key press.
+#[derive(Debug, PartialEq, Eq)]
+enum Pending {
+    /// Delete these items (the marked ones, or the selected one).
+    Delete(Vec<ItemId>),
+    /// Wipe cliphist's history.
+    Wipe,
 }
 
 /// Which keys do what. In `Normal`, letters are commands; in `Search`,
@@ -94,9 +106,14 @@ pub struct App<B: Backend> {
     /// Scroll position of the list widget. Owned here so it persists
     /// between frames. Its selection is kept in sync with `selected`.
     list_state: ListState,
-    /// The item that was armed for deletion by the previous key press.
+    /// The action armed by the previous key press (a first `d` or `W`).
     /// Only the very next key can confirm it.
-    pending_delete: Option<ItemId>,
+    pending: Option<Pending>,
+    /// Items marked with Space, for deleting several at once. Kept across
+    /// searches; marks on items that disappear are dropped on reload.
+    marked: HashSet<ItemId>,
+    /// Whether the help screen is open.
+    help: bool,
     /// Loaded previews, most recently loaded first.
     previews: VecDeque<(ItemId, Content)>,
     /// The item whose preview was last requested from the loader.
@@ -124,7 +141,9 @@ impl<B: Backend> App<B> {
             status: None,
             page_height: 10,
             list_state: ListState::default(),
-            pending_delete: None,
+            pending: None,
+            marked: HashSet::new(),
+            help: false,
             previews: VecDeque::new(),
             preview_requested: None,
             preview_scroll: None,
@@ -165,20 +184,33 @@ impl<B: Backend> App<B> {
         self.status.as_ref()
     }
 
+    pub fn marked_count(&self) -> usize {
+        self.marked.len()
+    }
+
+    pub fn help_open(&self) -> bool {
+        self.help
+    }
+
     pub fn show_error(&mut self, message: String) {
         self.status = Some(Status::Error(message));
     }
 
     /// Everything the UI needs to draw the list: the items, which of them
-    /// to show (in order, with highlights), and the list widget's state with
-    /// the selection synced.
+    /// to show (in order, with highlights), which are marked, and the list
+    /// widget's state with the selection synced.
     ///
     /// Returning these from one method lets the caller borrow several fields
     /// at once. Calling `items()` and then using `list_state` mutably would
     /// not compile, because `items()` borrows all of `self`.
-    pub fn list_view(&mut self) -> (&[Item], &[Match], &mut ListState) {
+    pub fn list_view(&mut self) -> (&[Item], &[Match], &HashSet<ItemId>, &mut ListState) {
         self.list_state.select(Some(self.selected));
-        (&self.items, &self.matches, &mut self.list_state)
+        (
+            &self.items,
+            &self.matches,
+            &self.marked,
+            &mut self.list_state,
+        )
     }
 
     pub fn set_page_height(&mut self, rows: usize) {
@@ -187,13 +219,18 @@ impl<B: Backend> App<B> {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         self.status = None;
-        // Taking it here means any key other than a second `d` cancels the
-        // pending delete.
-        let pending_delete = self.pending_delete.take();
+        // Taking it here means any key other than the confirming one
+        // cancels a pending delete or wipe.
+        let pending = self.pending.take();
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         if ctrl && key.code == KeyCode::Char('c') {
             return Action::Quit;
+        }
+        // While the help screen is open, any key just closes it.
+        if self.help {
+            self.help = false;
+            return Action::None;
         }
         // Shift+arrows scroll the preview in both modes.
         if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -204,12 +241,12 @@ impl<B: Backend> App<B> {
             }
         }
         match self.mode {
-            Mode::Normal => self.normal_key(key.code, ctrl, pending_delete),
+            Mode::Normal => self.normal_key(key.code, ctrl, pending),
             Mode::Search => self.search_key(key, ctrl),
         }
     }
 
-    fn normal_key(&mut self, code: KeyCode, ctrl: bool, pending_delete: Option<ItemId>) -> Action {
+    fn normal_key(&mut self, code: KeyCode, ctrl: bool, pending: Option<Pending>) -> Action {
         let half_page = (self.page_height / 2).max(1) as isize;
 
         // Arms are tried top to bottom, so the Ctrl combinations must come
@@ -219,7 +256,9 @@ impl<B: Backend> App<B> {
             KeyCode::Char('u') if ctrl => self.move_by(-half_page),
 
             KeyCode::Char('q') => return Action::Quit,
-            // Esc first clears an active filter, and only quits after that.
+            // Esc first clears marks, then an active filter, and only quits
+            // after that.
+            KeyCode::Esc if !self.marked.is_empty() => self.marked.clear(),
             KeyCode::Esc if !self.query.is_empty() => {
                 self.query.clear();
                 self.refilter_keeping_selection();
@@ -235,7 +274,10 @@ impl<B: Backend> App<B> {
 
             KeyCode::Enter => return self.copy_selected(),
             KeyCode::Char('p') => self.toggle_pin(),
-            KeyCode::Char('d') | KeyCode::Delete => self.press_delete(pending_delete),
+            KeyCode::Char(' ') => self.toggle_mark(),
+            KeyCode::Char('d') | KeyCode::Delete => self.press_delete(pending),
+            KeyCode::Char('W') => self.press_wipe(pending),
+            KeyCode::Char('?') => self.help = true,
             KeyCode::Char('r') => match self.reload() {
                 Ok(()) => self.status = Some(Status::Info("reloaded".into())),
                 Err(e) => self.show_error(format!("{e:#}")),
@@ -401,6 +443,9 @@ impl<B: Backend> App<B> {
     fn reload_selecting(&mut self, id: Option<ItemId>) -> Result<()> {
         self.entries = self.backend.list()?;
         self.rebuild_items();
+        // Drop marks on items that no longer exist.
+        let present: HashSet<ItemId> = self.items.iter().map(Item::id).collect();
+        self.marked.retain(|id| present.contains(id));
         self.refilter();
         self.reselect(id);
         Ok(())
@@ -461,54 +506,123 @@ impl<B: Backend> App<B> {
         })
     }
 
-    // --- delete -------------------------------------------------------------
+    // --- marking, delete and wipe -------------------------------------------
 
-    /// First press arms the delete; a second press on the same item,
-    /// straight after, performs it.
-    fn press_delete(&mut self, pending: Option<ItemId>) {
+    /// Marks or unmarks the selected item, then moves down so several can
+    /// be marked by pressing Space repeatedly.
+    fn toggle_mark(&mut self) {
         let Some(id) = self.selected().map(Item::id) else {
             return;
         };
-        // Comparing ids (not just "was the last key d") guards against the
-        // list changing between the two presses, e.g. on reload.
-        if pending.as_ref() == Some(&id) {
-            self.delete_selected();
-        } else {
-            self.pending_delete = Some(id);
-            self.status = Some(Status::Prompt("press d again to delete".into()));
+        if !self.marked.remove(&id) {
+            self.marked.insert(id);
         }
+        self.move_by(1);
     }
 
-    fn delete_selected(&mut self) {
+    /// What `d` would delete: the marked items if there are any, otherwise
+    /// the selected one. In list order.
+    fn delete_targets(&self) -> Vec<ItemId> {
+        if self.marked.is_empty() {
+            return self.selected().map(Item::id).into_iter().collect();
+        }
+        self.items
+            .iter()
+            .map(Item::id)
+            .filter(|id| self.marked.contains(id))
+            .collect()
+    }
+
+    /// First press arms the delete; a second press straight after performs
+    /// it.
+    fn press_delete(&mut self, pending: Option<Pending>) {
+        let targets = self.delete_targets();
+        if targets.is_empty() {
+            return;
+        }
+        // Comparing the targets (not just "was the last key d") guards
+        // against the list changing between the two presses, e.g. on reload.
+        if pending == Some(Pending::Delete(targets.clone())) {
+            self.delete_items(&targets);
+            return;
+        }
+        let prompt = match targets.len() {
+            1 => "press d again to delete".to_owned(),
+            n => format!("press d again to delete {n} entries"),
+        };
+        self.pending = Some(Pending::Delete(targets));
+        self.status = Some(Status::Prompt(prompt));
+    }
+
+    fn delete_items(&mut self, ids: &[ItemId]) {
         // Clone so we stop borrowing `self.items` before calling methods
         // that need `&mut self`.
-        let result = match self.selected().cloned() {
-            None => return,
-            Some(Item::History(entry)) => self.backend.delete(&entry).map(|()| "deleted 1 entry"),
-            Some(Item::Pinned(pin)) => self.delete_pin(&pin.hash).map(|()| "deleted pinned entry"),
+        let items: Vec<Item> = self
+            .items
+            .iter()
+            .filter(|item| ids.contains(&item.id()))
+            .cloned()
+            .collect();
+        let message = match items.as_slice() {
+            [Item::Pinned(_)] => "deleted pinned entry".to_owned(),
+            [_] => "deleted 1 entry".to_owned(),
+            many => format!("deleted {} entries", many.len()),
         };
-        let message = match result {
-            Ok(message) => message,
-            Err(e) => {
-                self.show_error(format!("{e:#}"));
-                return;
-            }
-        };
-        // The deleted item is gone, so reload keeps the position and the
-        // next item moves up into the selection.
-        self.status = Some(match self.reload() {
-            Ok(()) => Status::Info(message.into()),
+        let result = self.delete_from_storage(&items);
+        self.marked.clear();
+        // Reload even after an error, since some items may have been
+        // deleted. The deleted items are gone, so the selection keeps its
+        // position and the next item moves up into it.
+        let reloaded = self.reload();
+        self.status = Some(match result.and(reloaded) {
+            Ok(()) => Status::Info(message),
             Err(e) => Status::Error(format!("{e:#}")),
         });
     }
 
-    /// Deleting a pin removes it entirely: the pin and the history copy.
-    fn delete_pin(&mut self, hash: &str) -> Result<()> {
-        if let Some(entry) = self.pins_in_history.get(hash).cloned() {
-            self.backend.delete(&entry)?;
+    /// Deleting a pin removes it entirely: the pin and its history copy.
+    fn delete_from_storage(&mut self, items: &[Item]) -> Result<()> {
+        let mut history = Vec::new();
+        let mut pin_hashes = Vec::new();
+        for item in items {
+            match item {
+                Item::History(entry) => history.push(entry.clone()),
+                Item::Pinned(pin) => {
+                    if let Some(entry) = self.pins_in_history.get(&pin.hash) {
+                        history.push(entry.clone());
+                    }
+                    pin_hashes.push(pin.hash.clone());
+                }
+            }
         }
-        self.pins_mut()?.remove(hash)?;
+        if !history.is_empty() {
+            self.backend.delete(&history)?;
+        }
+        for hash in &pin_hashes {
+            self.pins_mut()?.remove(hash)?;
+        }
         Ok(())
+    }
+
+    /// `W` twice wipes cliphist's history. Pins are kept.
+    fn press_wipe(&mut self, pending: Option<Pending>) {
+        if self.entries.is_empty() {
+            self.status = Some(Status::Info("history is already empty".into()));
+            return;
+        }
+        if pending == Some(Pending::Wipe) {
+            let result = self.backend.wipe().and_then(|()| self.reload());
+            self.status = Some(match result {
+                Ok(()) => Status::Info("wiped history (pins kept)".into()),
+                Err(e) => Status::Error(format!("{e:#}")),
+            });
+            return;
+        }
+        self.pending = Some(Pending::Wipe);
+        self.status = Some(Status::Prompt(format!(
+            "press W again to wipe all {} history entries (pins are kept)",
+            self.entries.len()
+        )));
     }
 
     // --- previews -----------------------------------------------------------
@@ -665,11 +779,16 @@ mod tests {
                 .unwrap_or_else(|| entry.preview.clone().into_bytes()))
         }
 
-        fn delete(&mut self, entry: &Entry) -> Result<()> {
+        fn delete(&mut self, entries: &[Entry]) -> Result<()> {
             if self.fail_delete {
                 bail!("delete failed");
             }
-            self.entries.retain(|e| e.raw != entry.raw);
+            self.entries.retain(|e| !entries.contains(e));
+            Ok(())
+        }
+
+        fn wipe(&mut self) -> Result<()> {
+            self.entries.clear();
             Ok(())
         }
 
@@ -741,7 +860,7 @@ mod tests {
 
     /// Labels of the visible rows, pinned ones marked with "*".
     fn shown(app: &mut App<Fake>) -> Vec<String> {
-        let (items, matches, _) = app.list_view();
+        let (items, matches, _, _) = app.list_view();
         matches
             .iter()
             .map(|m| {
@@ -1244,6 +1363,161 @@ mod tests {
             Source::File(path) => assert_eq!(std::fs::read(path).unwrap(), b"b"),
             Source::History(_) => panic!("expected the pin's file"),
         }
+    }
+
+    // --- marking, wipe and help -----------------------------------------------
+
+    fn marked_labels(app: &App<Fake>) -> Vec<String> {
+        let mut labels: Vec<_> = app
+            .items
+            .iter()
+            .filter(|i| app.marked.contains(&i.id()))
+            .map(|i| i.label().to_owned())
+            .collect();
+        labels.sort();
+        labels
+    }
+
+    #[test]
+    fn space_marks_and_moves_down() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(marked_labels(&app), ["e4", "e5"]);
+        assert_eq!(app.selected_index(), 2);
+        // Space on a marked entry unmarks it.
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(marked_labels(&app), ["e5"]);
+    }
+
+    #[test]
+    fn dd_deletes_all_marked_entries() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(' ')); // e5
+        press(&mut app, KeyCode::Down); // skip e4
+        press(&mut app, KeyCode::Char(' ')); // e3
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            app.status(),
+            Some(&Status::Prompt("press d again to delete 2 entries".into()))
+        );
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            app.status(),
+            Some(&Status::Info("deleted 2 entries".into()))
+        );
+        assert_eq!(shown(&mut app), ["e4", "e2", "e1"]);
+        assert_eq!(app.marked_count(), 0);
+    }
+
+    #[test]
+    fn marked_pins_and_entries_are_deleted_together() {
+        let mut app = pinning_app(&["a", "b", "c"]);
+        pin_label(&mut app, "b"); // selection is on the pin
+        press(&mut app, KeyCode::Char(' ')); // *b, moves to "a"
+        press(&mut app, KeyCode::Char(' ')); // a
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(shown(&mut app), ["c"]);
+        assert!(app.pins.as_ref().unwrap().all().is_empty());
+        assert_eq!(history_len(&app), 1, "b's history copy is gone too");
+    }
+
+    #[test]
+    fn marks_survive_search_and_esc_clears_them_first() {
+        let mut app = history();
+        press(&mut app, KeyCode::Char(' ')); // "git push"
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "pull");
+        press(&mut app, KeyCode::Esc); // back to normal mode, filter kept
+        press(&mut app, KeyCode::Char(' ')); // "git pull"
+        assert_eq!(marked_labels(&app), ["git pull", "git push"]);
+
+        // Esc: marks first, then the filter, then quit.
+        assert_eq!(press(&mut app, KeyCode::Esc), Action::None);
+        assert_eq!(app.marked_count(), 0);
+        assert_eq!(app.query(), "pull");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.query(), "");
+        assert_eq!(press(&mut app, KeyCode::Esc), Action::Quit);
+    }
+
+    #[test]
+    fn marks_on_vanished_entries_are_dropped() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(' ')); // e5
+        press(&mut app, KeyCode::Char(' ')); // e4
+        app.backend.entries.retain(|e| e.id != 5);
+        app.history_changed();
+        assert_eq!(marked_labels(&app), ["e4"]);
+    }
+
+    #[test]
+    fn marking_counts_as_another_key_for_pending_delete() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(history_len(&app), 5);
+        assert!(matches!(app.status(), Some(Status::Prompt(_))));
+    }
+
+    #[test]
+    fn wipe_needs_two_presses_and_keeps_pins() {
+        let mut app = pinning_app(&["a", "b", "c"]);
+        pin_label(&mut app, "b");
+        press(&mut app, KeyCode::Char('W'));
+        assert_eq!(
+            app.status(),
+            Some(&Status::Prompt(
+                "press W again to wipe all 3 history entries (pins are kept)".into()
+            ))
+        );
+        assert_eq!(history_len(&app), 3);
+        press(&mut app, KeyCode::Char('W'));
+        assert_eq!(
+            app.status(),
+            Some(&Status::Info("wiped history (pins kept)".into()))
+        );
+        assert_eq!(history_len(&app), 0);
+        assert_eq!(shown(&mut app), ["*b"]);
+    }
+
+    #[test]
+    fn other_key_cancels_wipe() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('W'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('W'));
+        assert_eq!(history_len(&app), 5);
+        // A d in between doesn't confirm a wipe either.
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('W'));
+        assert_eq!(history_len(&app), 5);
+    }
+
+    #[test]
+    fn wiping_empty_history_says_so() {
+        let mut app = app_with(&[]);
+        press(&mut app, KeyCode::Char('W'));
+        assert_eq!(
+            app.status(),
+            Some(&Status::Info("history is already empty".into()))
+        );
+    }
+
+    #[test]
+    fn help_opens_and_any_key_closes_it_without_acting() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.help_open());
+        // This d only closes help; it doesn't arm a delete.
+        press(&mut app, KeyCode::Char('d'));
+        assert!(!app.help_open());
+        assert_eq!(app.status(), None);
+        press(&mut app, KeyCode::Char('d'));
+        assert!(matches!(app.status(), Some(Status::Prompt(_))));
     }
 
     // --- previews ---------------------------------------------------------

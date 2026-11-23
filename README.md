@@ -25,14 +25,14 @@ straight through cliphist.
 - **Pins** (`p`): keep entries at the top. They survive re-copies, cliphist
   trimming old entries, and `cliphist wipe`.
 - **Delete** (`dd`): press `d` twice so nothing is deleted by accident.
+  Mark several entries with `Space` first to delete them together.
+- **Wipe** (`WW`): clear cliphist's history from clipdeck. Pins are kept.
 - **Enter** copies the entry and exits.
 - **Live reload** when history changes while the popup is open.
-- Vim-style keys plus arrow keys.
+- Vim-style keys plus arrow keys. Press `?` for the full list.
 
 ## Planned
 
-- Select several entries and delete them at once
-- Wipe history from clipdeck (with confirmation, keeping pins)
 - Type filters: text, image, URL
 - Paste the entry straight into the previous window via `wtype`
 - Configurable keybinds and colors
@@ -111,7 +111,7 @@ window's *initial* title, so the title has to be set at launch with
 | Preview       | `cliphist decode`, only for the highlighted entry (lazy) |
 | Copy          | `cliphist decode \| wl-copy`                             |
 | Delete        | send the original `cliphist list` line to `cliphist delete` |
-| Wipe (planned) | `cliphist wipe`                                         |
+| Wipe          | `cliphist wipe`                                          |
 | Stay in sync  | watch cliphist's DB (`~/.cache/cliphist/db` by default) with `notify`, then re-list |
 
 After any change, list again rather than editing the UI's copy, so the
@@ -165,8 +165,9 @@ clipdeck stores no history of its own, only pins.
 - [x] **Preview pane**: full text, image thumbnails, and the thumbnail cache.
 - [x] **Live reload**: watching cliphist's database with `notify`.
 - [x] **Pins**: hash-keyed pin store and a pinned section at the top.
-- [ ] **Polish**: multi-select, type filters, wipe with confirmation,
-  `--pick`, `wtype` paste, configurable keybinds and colors.
+- [ ] **Polish** (in progress): multi-select delete, wipe with confirmation
+  and a help screen are done; type filters, `--pick`, `wtype` paste, and
+  configurable keybinds and colors are next.
 - [ ] **Release**: README GIF (`vhs`), AUR package, crates.io.
 
 ## Non-goals

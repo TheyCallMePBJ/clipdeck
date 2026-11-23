@@ -81,10 +81,16 @@ impl Backend for Cliphist {
         Ok(())
     }
 
-    fn delete(&mut self, entry: &Entry) -> Result<()> {
-        // `cliphist delete` reads whole lines from stdin.
-        let line = format!("{}\n", entry.raw);
-        run(self.command("delete"), Some(line.as_bytes()))?;
+    fn delete(&mut self, entries: &[Entry]) -> Result<()> {
+        // `cliphist delete` reads whole lines from stdin, so several
+        // entries can go in one call.
+        let lines: String = entries.iter().map(|e| format!("{}\n", e.raw)).collect();
+        run(self.command("delete"), Some(lines.as_bytes()))?;
+        Ok(())
+    }
+
+    fn wipe(&mut self) -> Result<()> {
+        run(self.command("wipe"), None)?;
         Ok(())
     }
 }
@@ -152,7 +158,12 @@ mod tests {
 
         assert_eq!(backend.decode(&entries[1]).unwrap(), b"second");
 
-        backend.delete(&entries[1]).unwrap();
+        backend.store(b"fourth").unwrap();
+        let entries = backend.list().unwrap();
+        // fourth, third, second, first: delete second and fourth at once.
+        backend
+            .delete(&[entries[0].clone(), entries[2].clone()])
+            .unwrap();
         let previews: Vec<_> = backend
             .list()
             .unwrap()
@@ -160,6 +171,9 @@ mod tests {
             .map(|e| e.preview)
             .collect();
         assert_eq!(previews, ["third", "first"]);
+
+        backend.wipe().unwrap();
+        assert!(backend.list().unwrap().is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
