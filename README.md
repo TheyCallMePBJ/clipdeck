@@ -36,10 +36,7 @@ straight through cliphist.
   scripts (`clipdeck --pick | ...`). Exits with 130 if nothing was chosen.
 - **Live reload** when history changes while the popup is open.
 - Vim-style keys plus arrow keys. Press `?` for the full list.
-
-## Planned
-
-- Configurable keybinds and colors
+- **Configurable** keybinds and colors, see [Configuration](#configuration).
 
 ## Requirements
 
@@ -111,6 +108,35 @@ window's *initial* title, so the title has to be set at launch with
 > slow instance, so match the window by **title** instead. Measure the
 > startup time early.
 
+## Configuration
+
+clipdeck reads `~/.config/clipdeck/config.toml` if it exists. Every setting
+is optional. To start from the defaults, with every option explained:
+
+```bash
+mkdir -p ~/.config/clipdeck
+clipdeck --default-config > ~/.config/clipdeck/config.toml
+```
+
+A small example:
+
+```toml
+[keys]
+delete = "x"                 # x x deletes; d is free again
+pin = ["p", "ctrl+p"]
+wipe = []                    # unbind
+
+[colors]
+pin = "#ffaa00"
+selected_bg = "dark-gray"    # instead of reverse video
+```
+
+Listing a command replaces its default keys, and a key you bind is taken
+away from the command that had it by default. If the file has a mistake
+(an unknown command or color, or a key bound twice), clipdeck says so in
+the status bar and runs with the defaults. `--config PATH` reads a different
+file.
+
 ## Design
 
 ### cliphist is the source of truth
@@ -145,7 +171,7 @@ clipdeck stores no history of its own, only pins.
 
 ### Paths (XDG)
 
-- Config (planned): `~/.config/clipdeck/config.toml`
+- Config: `~/.config/clipdeck/config.toml`
 - Pins: `~/.local/share/clipdeck/pins.toml` (the list) and
   `~/.local/share/clipdeck/pins/<hash>` (each pin's content)
 - Thumbnail cache: `~/.cache/clipdeck/thumbs/`
@@ -175,9 +201,9 @@ clipdeck stores no history of its own, only pins.
 - [x] **Preview pane**: full text, image thumbnails, and the thumbnail cache.
 - [x] **Live reload**: watching cliphist's database with `notify`.
 - [x] **Pins**: hash-keyed pin store and a pinned section at the top.
-- [ ] **Polish** (in progress): multi-select delete, wipe with
-  confirmation, a help screen, type filters, `--pick` and `--paste` are
-  done; configurable keybinds and colors are next.
+- [x] **Polish**: multi-select delete, wipe with confirmation, a help
+  screen, type filters, `--pick`, `--paste`, and configurable keybinds and
+  colors.
 - [ ] **Release**: README GIF (`vhs`), AUR package, crates.io.
 
 ## Non-goals

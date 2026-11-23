@@ -3,12 +3,14 @@
 use image::imageops::FilterType;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, Backend, Mode, Status};
+use crate::config::Theme;
+use crate::keys::{Command, Key, Keymap};
 use crate::entry::Kind;
 use crate::item::Item;
 use crate::preview::Content;
@@ -39,61 +41,109 @@ pub fn draw<B: Backend>(frame: &mut Frame, app: &mut App<B>) {
     frame.render_widget(status_line(app), status_area);
 
     if app.help_open() {
-        draw_help(frame, app.enter_verb());
+        draw_help(frame, app);
     }
 }
 
-/// Every key, as (keys, what they do). `None` starts a new section.
-const HELP: &[Option<(&str, &str)>] = &[
-    Some(("j/k  ↑/↓", "move")),
-    Some(("g/G  Home/End", "top / bottom")),
-    Some(("Ctrl+d/u  PgDn/PgUp", "half page / page")),
-    Some(("J/K  Shift+↑/↓", "scroll the preview")),
-    Some(("Enter", "{enter} and close")),
-    Some(("f  /", "search")),
-    Some(("p", "pin / unpin")),
-    Some(("Space", "mark (to delete several)")),
-    Some(("dd", "delete (the marked entries, if any)")),
-    Some(("WW", "wipe history (pins are kept)")),
-    Some(("r", "reload")),
-    Some(("Tab  Shift+Tab", "show all / text / images / URLs")),
-    Some(("Esc", "clear marks, search, type; then quit")),
-    Some(("q  Ctrl+c", "quit")),
-    None,
-    Some(("typing", "filter: 'exact ^prefix suffix$ !not")),
-    Some(("↑/↓  Ctrl+n/p", "move")),
-    Some(("Ctrl+w/u", "delete word / clear")),
-    Some(("Tab  Shift+Tab", "show all / text / images / URLs")),
-    Some(("Enter", "{enter} and close")),
-    Some(("Esc", "back to the list, keeping the filter")),
+/// The help screen's rows for the list: commands shown together (their
+/// keys side by side, as in `j/k`) and what they do.
+const HELP: &[(&[Command], &str)] = &[
+    (&[Command::Down, Command::Up], "move"),
+    (&[Command::HalfPageDown, Command::HalfPageUp], "half page down / up"),
+    (&[Command::PageDown, Command::PageUp], "page down / up"),
+    (&[Command::Top, Command::Bottom], "top / bottom"),
+    (&[Command::PreviewDown, Command::PreviewUp], "scroll the preview"),
+    (&[Command::Select], "{enter} and close"),
+    (&[Command::Search], "search"),
+    (&[Command::Pin], "pin / unpin"),
+    (&[Command::Mark], "mark (to delete several)"),
+    (&[Command::Delete], "press twice: delete (the marked, if any)"),
+    (&[Command::Wipe], "press twice: wipe history (pins kept)"),
+    (&[Command::NextType, Command::PreviousType], "show all / text / images / URLs"),
+    (&[Command::Reload], "reload"),
+    (&[Command::Help], "this help"),
+    (&[Command::Back], "clear marks, search, type; then quit"),
+    (&[Command::Quit], "quit (ctrl+c always quits)"),
 ];
 
-fn draw_help(frame: &mut Frame, enter_verb: &str) {
+/// Fixed keys while searching; everything else works as in the list.
+const SEARCH_HELP: &[(&str, &str)] = &[
+    ("typing", "filter: 'exact ^prefix suffix$ !not"),
+    ("Backspace", "delete a character"),
+    ("ctrl+w  ctrl+u", "delete word / clear"),
+    ("Esc", "back to the list, keeping the filter"),
+    ("other keys", "as in the list (Enter, arrows, Tab, ctrl+...)"),
+];
+
+/// The keys of a help row: each command's keys side by side, so `j`, `k`
+/// and `Down`, `Up` become `j/k  Down/Up`.
+fn help_keys(keymap: &Keymap, commands: &[Command]) -> String {
+    let lists: Vec<&[Key]> = commands.iter().map(|c| keymap.keys(*c)).collect();
+    let longest = lists.iter().map(|l| l.len()).max().unwrap_or(0);
+    (0..longest)
+        .map(|i| {
+            lists
+                .iter()
+                .filter_map(|list| list.get(i).map(Key::to_string))
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+fn draw_help<B: Backend>(frame: &mut Frame, app: &App<B>) {
+    let theme = app.theme();
+    let list_rows: Vec<(String, String)> = HELP
+        .iter()
+        .map(|(commands, action)| {
+            (
+                help_keys(app.keymap(), commands),
+                action.replace("{enter}", app.enter_verb()),
+            )
+        })
+        .filter(|(keys, _)| !keys.is_empty())
+        .collect();
+    let search_rows: Vec<(String, String)> = SEARCH_HELP
+        .iter()
+        .map(|(k, a)| ((*k).to_owned(), (*a).to_owned()))
+        .collect();
+    let key_width = list_rows
+        .iter()
+        .chain(&search_rows)
+        .map(|(keys, _)| keys.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let row = |(keys, action): &(String, String)| {
+        Line::from(vec![
+            format!("   {keys:<key_width$}").fg(theme.accent),
+            action.clone().into(),
+        ])
+    };
+
     let mut lines = vec![Line::from(" in the list".bold())];
-    for row in HELP {
-        match row {
-            Some((keys, action)) => lines.push(Line::from(vec![
-                format!("   {keys:<22}").fg(Color::Yellow),
-                action.replace("{enter}", enter_verb).into(),
-            ])),
-            None => {
-                lines.push(Line::raw(""));
-                lines.push(Line::from(" while searching".bold()));
-            }
-        }
-    }
+    lines.extend(list_rows.iter().map(row));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(" while searching".bold()));
+    lines.extend(search_rows.iter().map(row));
     lines.push(Line::raw(""));
     lines.push(Line::from(" press any key to close".dim()));
 
-    let width = 64.min(frame.area().width);
+    let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let width = (widest + 3).min(frame.area().width);
     let height = (lines.len() as u16 + 2).min(frame.area().height);
     let area = frame
         .area()
         .centered(Constraint::Length(width), Constraint::Length(height));
     // Clear first, so the list underneath doesn't show through.
     frame.render_widget(Clear, area);
-    let help = Paragraph::new(lines).block(Block::bordered().title(" keys "));
+    let help = Paragraph::new(lines).block(border(theme).title(" keys "));
     frame.render_widget(help, area);
+}
+
+fn border(theme: &Theme) -> Block<'static> {
+    Block::bordered().border_style(Style::new().fg(theme.border))
 }
 
 fn draw_list<B: Backend>(frame: &mut Frame, app: &mut App<B>, list_area: Rect) {
@@ -104,7 +154,8 @@ fn draw_list<B: Backend>(frame: &mut Frame, app: &mut App<B>, list_area: Rect) {
         Some(label) => format!(" clipdeck · {label} "),
         None => " clipdeck ".to_owned(),
     };
-    let block = Block::bordered().title(title);
+    let theme = app.theme().clone();
+    let block = border(&theme).title(title);
 
     if app.match_count() == 0 {
         let message = match (type_label, app.query().is_empty()) {
@@ -119,19 +170,20 @@ fn draw_list<B: Backend>(frame: &mut Frame, app: &mut App<B>, list_area: Rect) {
             .iter()
             .map(|m| {
                 let item = &items[m.index];
-                list_item(item, m, marked.contains(&item.id()))
+                list_item(item, m, marked.contains(&item.id()), &theme)
             })
             .collect();
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .highlight_style(theme.selected())
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, list_area, state);
     }
 }
 
 fn draw_preview<B: Backend>(frame: &mut Frame, app: &mut App<B>, area: Rect) {
-    let block = Block::bordered();
+    let theme = app.theme().clone();
+    let block = border(&theme);
     let Some((item, content, scroll)) = app.preview_view() else {
         // Nothing selected (empty history or no matches).
         frame.render_widget(block.title(" preview "), area);
@@ -172,7 +224,7 @@ fn draw_preview<B: Backend>(frame: &mut Frame, app: &mut App<B>, area: Rect) {
             frame.render_stateful_widget(widget, inner, protocol.as_mut());
         }
         Some(Content::Error(msg)) => {
-            let error = Paragraph::new(msg.as_str().fg(Color::Red))
+            let error = Paragraph::new(msg.as_str().fg(theme.error))
                 .wrap(Wrap { trim: false })
                 .block(block);
             frame.render_widget(error, area);
@@ -238,12 +290,18 @@ fn human_size(bytes: usize) -> String {
 fn draw_search_line<B: Backend>(frame: &mut Frame, app: &App<B>, area: Rect) {
     let line = match (app.mode(), app.query().is_empty()) {
         (Mode::Search, _) => Line::from(vec![" search: ".bold(), app.query().into()]),
-        (Mode::Normal, false) => Line::from(vec![
-            " filter: ".dim(),
-            app.query().into(),
-            "  (esc to clear)".dim(),
-        ]),
-        (Mode::Normal, true) => Line::from(" press f to search".dim()),
+        (Mode::Normal, false) => match app.keymap().first(Command::Back) {
+            Some(back) => Line::from(vec![
+                " filter: ".dim(),
+                app.query().into(),
+                format!("  ({back} to clear)").dim(),
+            ]),
+            None => Line::from(vec![" filter: ".dim(), app.query().into()]),
+        },
+        (Mode::Normal, true) => match app.keymap().first(Command::Search) {
+            Some(search) => Line::from(format!(" press {search} to search").dim()),
+            None => Line::raw(""),
+        },
     };
     // Show the terminal cursor at the end of the query while typing.
     if app.mode() == Mode::Search {
@@ -255,13 +313,13 @@ fn draw_search_line<B: Backend>(frame: &mut Frame, app: &App<B>, area: Rect) {
 
 /// One list row, with the characters that matched the query highlighted.
 /// Marked rows start with a dot and pinned rows with a star.
-fn list_item(item: &Item, m: &Match, marked: bool) -> ListItem<'static> {
+fn list_item(item: &Item, m: &Match, marked: bool, theme: &Theme) -> ListItem<'static> {
     let base = match item.kind() {
         Kind::Text => Style::new(),
-        Kind::Url => Style::new().fg(Color::Cyan).underlined(),
+        Kind::Url => Style::new().fg(theme.url).underlined(),
         Kind::Image { .. } => Style::new().italic(),
     };
-    let highlight = base.fg(Color::Yellow).bold();
+    let highlight = base.fg(theme.matched).bold();
 
     // Split the label into runs of highlighted and plain characters.
     // Note: nucleo counts grapheme clusters while this counts chars, so
@@ -269,10 +327,10 @@ fn list_item(item: &Item, m: &Match, marked: bool) -> ListItem<'static> {
     // emoji). Plain text is unaffected.
     let mut spans = Vec::new();
     if marked {
-        spans.push(Span::styled("● ", Style::new().fg(Color::Magenta)));
+        spans.push(Span::styled("● ", Style::new().fg(theme.mark)));
     }
     if item.is_pinned() {
-        spans.push(Span::styled("★ ", Style::new().fg(Color::Yellow)));
+        spans.push(Span::styled("★ ", Style::new().fg(theme.pin)));
     }
     let mut run = String::new();
     let mut run_highlighted = false;
@@ -293,10 +351,11 @@ fn list_item(item: &Item, m: &Match, marked: bool) -> ListItem<'static> {
 }
 
 fn status_line<B: Backend>(app: &App<B>) -> Line<'static> {
+    let theme = app.theme();
     match app.status() {
-        Some(Status::Info(msg)) => Line::from(format!(" {msg}")).fg(Color::Green),
-        Some(Status::Prompt(msg)) => Line::from(format!(" {msg}")).fg(Color::Yellow),
-        Some(Status::Error(msg)) => Line::from(format!(" error: {msg}")).fg(Color::Red),
+        Some(Status::Info(msg)) => Line::from(format!(" {msg}")).fg(theme.info),
+        Some(Status::Prompt(msg)) => Line::from(format!(" {msg}")).fg(theme.prompt),
+        Some(Status::Error(msg)) => Line::from(format!(" error: {msg}")).fg(theme.error),
         None => {
             let total = app.items().len();
             let shown = app.match_count();
@@ -309,19 +368,39 @@ fn status_line<B: Backend>(app: &App<B>) -> Line<'static> {
                 position.push_str(&format!(" of {total}"));
             }
             let marked = app.marked_count();
-            let verb = app.enter_verb();
-            let keys = match app.mode() {
-                Mode::Normal if marked > 0 => {
-                    format!("{marked} marked · space mark · dd delete marked · esc clear marks")
-                }
-                Mode::Normal => format!(
-                    "enter {verb} · f search · p pin · space mark · dd delete · ? help · q quit"
-                ),
-                Mode::Search => format!("type to filter · ↑/↓ move · enter {verb} · esc done"),
-            };
+            let keys = hints(app, marked).join(" · ");
             Line::from(format!(" {position} · {keys}")).dim()
         }
     }
+}
+
+/// The key hints in the status bar, for the keys that are bound.
+fn hints<B: Backend>(app: &App<B>, marked: usize) -> Vec<String> {
+    let keymap = app.keymap();
+    let hint = |key: Option<String>, what: &str| key.map(|k| format!("{k} {what}"));
+    let wanted = match app.mode() {
+        Mode::Normal if marked > 0 => vec![
+            Some(format!("{marked} marked")),
+            hint(keymap.first(Command::Mark), "mark"),
+            hint(keymap.twice(Command::Delete), "delete marked"),
+            hint(keymap.first(Command::Back), "clear marks"),
+        ],
+        Mode::Normal => vec![
+            hint(keymap.first(Command::Select), app.enter_verb()),
+            hint(keymap.first(Command::Search), "search"),
+            hint(keymap.first(Command::Pin), "pin"),
+            hint(keymap.first(Command::Mark), "mark"),
+            hint(keymap.twice(Command::Delete), "delete"),
+            hint(keymap.first(Command::Help), "help"),
+            hint(keymap.first(Command::Quit), "quit"),
+        ],
+        Mode::Search => vec![
+            Some("type to filter".to_owned()),
+            hint(keymap.first(Command::Select), app.enter_verb()),
+            Some("Esc done".to_owned()),
+        ],
+    };
+    wanted.into_iter().flatten().collect()
 }
 
 #[cfg(test)]
@@ -356,7 +435,11 @@ mod tests {
 
     /// Draws one frame into an in-memory terminal and returns its text.
     fn render(app: &mut App<Fixed>) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        render_at(app, 60, 8)
+    }
+
+    fn render_at(app: &mut App<Fixed>, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| draw(f, app)).unwrap();
         let buffer = terminal.backend().buffer();
         (0..buffer.area.height)
@@ -390,16 +473,16 @@ mod tests {
         assert!(screen.contains("press f to search"), "{screen}");
         assert!(screen.contains("> git push"), "{screen}");
         assert!(screen.contains("[image] png 2560x1440 · 2 MiB"), "{screen}");
-        assert!(screen.contains("1/3 · enter copy"), "{screen}");
+        assert!(screen.contains("1/3 · Enter copy"), "{screen}");
     }
 
     #[test]
     fn enter_label_follows_the_mode() {
         let mut app = app();
         app.set_enter_verb("paste");
-        assert!(render(&mut app).contains("1/3 · enter paste"));
+        assert!(render(&mut app).contains("1/3 · Enter paste"));
         app.handle_key(KeyEvent::from(KeyCode::Char('?')));
-        assert!(render(&mut app).contains("paste and close"));
+        assert!(render_at(&mut app, 100, 40).contains("paste and close"));
     }
 
     #[test]
@@ -502,8 +585,30 @@ mod tests {
             })
             .collect();
         assert!(screen.contains(" keys "), "{screen}");
-        assert!(screen.contains("wipe history (pins are kept)"), "{screen}");
+        assert!(screen.contains("j/k  Down/Up  ctrl+n/ctrl+p"), "{screen}");
+        assert!(screen.contains("press twice: wipe history (pins kept)"), "{screen}");
         assert!(screen.contains("press any key to close"), "{screen}");
+    }
+
+    #[test]
+    fn hints_prompts_and_colors_follow_the_config() {
+        let mut app = app();
+        let config = crate::config::tests::user(
+            "[keys]\ndelete = \"x\"\nsearch = \"s\"\n[colors]\nborder = \"blue\"",
+        )
+        .unwrap();
+        app.set_config(config);
+        let screen = render_at(&mut app, 100, 8);
+        assert!(screen.contains("press s to search"), "{screen}");
+        assert!(screen.contains("s search"), "{screen}");
+        assert!(screen.contains("xx delete"), "{screen}");
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(0, 1)].fg, ratatui::style::Color::Blue);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(render_at(&mut app, 100, 8).contains("press x again to delete"));
     }
 
     #[test]

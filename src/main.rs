@@ -1,8 +1,10 @@
 mod app;
 mod cliphist;
+mod config;
 mod entry;
 mod event;
 mod item;
+mod keys;
 mod paste;
 mod pins;
 mod preview;
@@ -61,6 +63,16 @@ struct Cli {
         default_missing_value = paste::DEFAULT_KEYS
     )]
     paste: Option<String>,
+
+    /// Read keybinds and colors from this file instead of
+    /// ~/.config/clipdeck/config.toml.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// Print the default config, with every option explained, and exit.
+    /// A starting point: `clipdeck --default-config > ~/.config/clipdeck/config.toml`
+    #[arg(long)]
+    default_config: bool,
 }
 
 /// Starts watching cliphist's database for live reload. Returns the watcher,
@@ -88,6 +100,10 @@ fn start_watching(
 
 fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
+    if cli.default_config {
+        print!("{}", config::DEFAULT_CONFIG);
+        return Ok(ExitCode::SUCCESS);
+    }
     let start = Instant::now();
     // Catch a bad shortcut now, rather than after an entry was chosen.
     if let Some(keys) = &cli.paste {
@@ -103,8 +119,22 @@ fn main() -> Result<ExitCode> {
         Some(Err(e)) => (None, Some(format!("pins unavailable: {e:#}"))),
         None => (None, Some("pins unavailable: no home directory".to_owned())),
     };
+    // A broken config falls back to the defaults, with the error shown in
+    // the status bar (and printed after exit), for the same reason.
+    let (config, config_error) = match cli.config.clone().or_else(config::default_path) {
+        Some(path) => match config::Config::load(&path) {
+            Ok(config) => (config, None),
+            Err(e) => (
+                config::Config::default(),
+                Some(format!("config ignored: {e:#}")),
+            ),
+        },
+        None => (config::Config::default(), None),
+    };
     let mut app = App::new(cliphist.clone(), pins)?;
-    if let Some(message) = &pins_error {
+    app.set_config(config);
+    // The config error wins if there are both: it's the one just made.
+    for message in [&pins_error, &config_error].into_iter().flatten() {
         app.show_error(message.clone());
     }
     if cli.pick {
@@ -151,6 +181,9 @@ fn main() -> Result<ExitCode> {
     drop(use_terminal);
 
     let (selected, first_frame) = result?;
+    if let Some(message) = &config_error {
+        eprintln!("clipdeck: {message}");
+    }
     if cli.timing {
         eprintln!(
             "cliphist list: {listed:?}, terminal query: {:?}, first frame: {first_frame:?}",

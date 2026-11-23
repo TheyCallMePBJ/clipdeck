@@ -10,6 +10,8 @@ use ratatui::widgets::ListState;
 
 use crate::entry::{Entry, Kind};
 use crate::item::{Item, ItemId};
+use crate::config::{Config, Theme};
+use crate::keys::{Command, Key, Keymap};
 use crate::pins::{self, Pins};
 use crate::preview::{Content, Loaded, Request, Source};
 use crate::search::{Match, Searcher};
@@ -174,11 +176,15 @@ pub struct App<B: Backend> {
     /// What Enter does with the entry, for the help and status bar:
     /// "copy", "paste" or "print". The work happens in `main` after exit.
     enter_verb: &'static str,
+    keymap: Keymap,
+    /// Colors, for the UI.
+    theme: Theme,
 }
 
 impl<B: Backend> App<B> {
     pub fn new(backend: B, pins: Option<Pins>) -> Result<Self> {
         let entries = backend.list()?;
+        let default_config = Config::default();
         let mut app = Self {
             backend,
             pins,
@@ -202,6 +208,8 @@ impl<B: Backend> App<B> {
             preview_requested: None,
             preview_scroll: None,
             enter_verb: "copy",
+            keymap: default_config.keymap,
+            theme: default_config.theme,
         };
         app.rebuild_items();
         app.refilter_from_top();
@@ -259,6 +267,24 @@ impl<B: Backend> App<B> {
         self.enter_verb = verb;
     }
 
+    pub fn keymap(&self) -> &Keymap {
+        &self.keymap
+    }
+
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    pub fn set_config(&mut self, config: Config) {
+        self.keymap = config.keymap;
+        self.theme = config.theme;
+    }
+
+    /// The key to press for `command`, for prompts like "press d again".
+    fn key_name(&self, command: Command) -> String {
+        self.keymap.first(command).unwrap_or_else(|| command.name().to_owned())
+    }
+
     pub fn show_error(&mut self, message: String) {
         self.status = Some(Status::Error(message));
     }
@@ -291,6 +317,7 @@ impl<B: Backend> App<B> {
         let pending = self.pending.take();
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
+        // Always quits, whatever the config says, so there's a way out.
         if ctrl && key.code == KeyCode::Char('c') {
             return Action::Quit;
         }
@@ -299,115 +326,84 @@ impl<B: Backend> App<B> {
             self.help = false;
             return Action::None;
         }
-        // Tab cycles the type filter in both modes.
-        match key.code {
-            KeyCode::Tab => return self.set_type_filter(self.type_filter.next()),
-            KeyCode::BackTab => return self.set_type_filter(self.type_filter.previous()),
-            _ => {}
+        let key = Key::from_event(key);
+        if self.mode == Mode::Search && self.search_key(key) {
+            return Action::None;
         }
-        // Shift+arrows scroll the preview in both modes.
-        if key.modifiers.contains(KeyModifiers::SHIFT) {
-            match key.code {
-                KeyCode::Down => return self.scroll_preview(1),
-                KeyCode::Up => return self.scroll_preview(-1),
-                _ => {}
-            }
-        }
-        match self.mode {
-            Mode::Normal => self.normal_key(key.code, ctrl, pending),
-            Mode::Search => self.search_key(key, ctrl),
+        match self.keymap.command(key) {
+            Some(command) => self.run(command, pending),
+            None => Action::None,
         }
     }
 
-    fn normal_key(&mut self, code: KeyCode, ctrl: bool, pending: Option<Pending>) -> Action {
+    /// Handles the keys that edit the query. Returns false for any other
+    /// key, which then runs its bound command as in the list.
+    fn search_key(&mut self, key: Key) -> bool {
+        if key == Key::parse("Esc").expect("valid key") {
+            // Leave search mode but keep the filter, so the results can be
+            // browsed with the normal keys (and entries deleted).
+            self.mode = Mode::Normal;
+        } else if key == Key::parse("Backspace").expect("valid key") {
+            if self.query.pop().is_some() {
+                self.refilter_from_top();
+            } else {
+                self.mode = Mode::Normal;
+            }
+        } else if key == Key::parse("ctrl+u").expect("valid key") {
+            self.query.clear();
+            self.refilter_from_top();
+        } else if key == Key::parse("ctrl+w").expect("valid key") {
+            delete_last_word(&mut self.query);
+            self.refilter_from_top();
+        } else if let Some(c) = key.plain_char() {
+            self.query.push(c);
+            self.refilter_from_top();
+        } else {
+            return false;
+        }
+        true
+    }
+
+    fn run(&mut self, command: Command, pending: Option<Pending>) -> Action {
         let half_page = (self.page_height / 2).max(1) as isize;
-
-        // Arms are tried top to bottom, so the Ctrl combinations must come
-        // before the plain letters they share a key with.
-        match code {
-            KeyCode::Char('d') if ctrl => self.move_by(half_page),
-            KeyCode::Char('u') if ctrl => self.move_by(-half_page),
-
-            KeyCode::Char('q') => return Action::Quit,
-            // Esc first clears marks, then the search, then the type
-            // filter, and only quits after that.
-            KeyCode::Esc if !self.marked.is_empty() => self.marked.clear(),
-            KeyCode::Esc if !self.query.is_empty() => {
-                self.query.clear();
-                self.refilter_keeping_selection();
-            }
-            KeyCode::Esc if self.type_filter != TypeFilter::All => {
-                self.set_type_filter(TypeFilter::All);
-            }
-            KeyCode::Esc => return Action::Quit,
-            KeyCode::Char('f') | KeyCode::Char('/') => self.mode = Mode::Search,
-            KeyCode::Char('j') => self.move_by(1),
-            KeyCode::Char('k') => self.move_by(-1),
-            KeyCode::Char('g') => self.selected = 0,
-            KeyCode::Char('G') => self.selected = self.last_index(),
-            KeyCode::Char('J') => return self.scroll_preview(1),
-            KeyCode::Char('K') => return self.scroll_preview(-1),
-
-            KeyCode::Enter => return self.copy_selected(),
-            KeyCode::Char('p') => self.toggle_pin(),
-            KeyCode::Char(' ') => self.toggle_mark(),
-            KeyCode::Char('d') | KeyCode::Delete => self.press_delete(pending),
-            KeyCode::Char('W') => self.press_wipe(pending),
-            KeyCode::Char('?') => self.help = true,
-            KeyCode::Char('r') => match self.reload() {
+        let page = self.page_height as isize;
+        match command {
+            Command::Down => self.move_by(1),
+            Command::Up => self.move_by(-1),
+            Command::HalfPageDown => self.move_by(half_page),
+            Command::HalfPageUp => self.move_by(-half_page),
+            Command::PageDown => self.move_by(page),
+            Command::PageUp => self.move_by(-page),
+            Command::Top => self.selected = 0,
+            Command::Bottom => self.selected = self.last_index(),
+            Command::PreviewDown => return self.scroll_preview(1),
+            Command::PreviewUp => return self.scroll_preview(-1),
+            Command::Select => return self.copy_selected(),
+            Command::Search => self.mode = Mode::Search,
+            Command::Pin => self.toggle_pin(),
+            Command::Mark => self.toggle_mark(),
+            Command::Delete => self.press_delete(pending),
+            Command::Wipe => self.press_wipe(pending),
+            Command::NextType => return self.set_type_filter(self.type_filter.next()),
+            Command::PreviousType => return self.set_type_filter(self.type_filter.previous()),
+            Command::Reload => match self.reload() {
                 Ok(()) => self.status = Some(Status::Info("reloaded".into())),
                 Err(e) => self.show_error(format!("{e:#}")),
             },
-            other => self.navigate(other),
-        }
-        Action::None
-    }
-
-    fn search_key(&mut self, key: KeyEvent, ctrl: bool) -> Action {
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        match key.code {
-            // Leave search mode but keep the filter, so the results can be
-            // browsed with the normal keys (and entries deleted).
-            KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Enter => return self.copy_selected(),
-            KeyCode::Backspace => {
-                if self.query.pop().is_some() {
-                    self.refilter_from_top();
-                } else {
-                    self.mode = Mode::Normal;
-                }
-            }
-            KeyCode::Char('u') if ctrl => {
+            Command::Help => self.help = true,
+            // Back first clears marks, then the search, then the type
+            // filter, and only quits after that.
+            Command::Back if !self.marked.is_empty() => self.marked.clear(),
+            Command::Back if !self.query.is_empty() => {
                 self.query.clear();
-                self.refilter_from_top();
+                self.refilter_keeping_selection();
             }
-            KeyCode::Char('w') if ctrl => {
-                delete_last_word(&mut self.query);
-                self.refilter_from_top();
+            Command::Back if self.type_filter != TypeFilter::All => {
+                self.set_type_filter(TypeFilter::All);
             }
-            KeyCode::Char('n') if ctrl => self.move_by(1),
-            KeyCode::Char('p') if ctrl => self.move_by(-1),
-            KeyCode::Char(c) if !ctrl && !alt => {
-                self.query.push(c);
-                self.refilter_from_top();
-            }
-            other => self.navigate(other),
+            Command::Back | Command::Quit => return Action::Quit,
         }
         Action::None
-    }
-
-    /// Keys that move the selection the same way in both modes.
-    fn navigate(&mut self, code: KeyCode) {
-        let page = self.page_height as isize;
-        match code {
-            KeyCode::Down => self.move_by(1),
-            KeyCode::Up => self.move_by(-1),
-            KeyCode::PageDown => self.move_by(page),
-            KeyCode::PageUp => self.move_by(-page),
-            KeyCode::Home => self.selected = 0,
-            KeyCode::End => self.selected = self.last_index(),
-            _ => {}
-        }
     }
 
     fn copy_selected(&mut self) -> Action {
@@ -633,9 +629,10 @@ impl<B: Backend> App<B> {
             self.delete_items(&targets);
             return;
         }
+        let key = self.key_name(Command::Delete);
         let prompt = match targets.len() {
-            1 => "press d again to delete".to_owned(),
-            n => format!("press d again to delete {n} entries"),
+            1 => format!("press {key} again to delete"),
+            n => format!("press {key} again to delete {n} entries"),
         };
         self.pending = Some(Pending::Delete(targets));
         self.status = Some(Status::Prompt(prompt));
@@ -707,7 +704,8 @@ impl<B: Backend> App<B> {
         }
         self.pending = Some(Pending::Wipe);
         self.status = Some(Status::Prompt(format!(
-            "press W again to wipe all {} history entries (pins are kept)",
+            "press {} again to wipe all {} history entries (pins are kept)",
+            self.key_name(Command::Wipe),
             self.entries.len()
         )));
     }
@@ -1176,6 +1174,31 @@ mod tests {
             press(&mut app, KeyCode::Enter),
             Action::Copy(CopySource::Entry(entry(2, "git pull")))
         );
+    }
+
+    #[test]
+    fn rebound_keys_work_and_letters_still_type_while_searching() {
+        let mut app = history();
+        app.set_config(
+            crate::config::tests::user("[keys]\ndown = [\"x\", \"ctrl+j\"]\nsearch = \"s\"")
+                .unwrap(),
+        );
+        // The old keys do nothing now.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!((app.selected_index(), app.mode()), (0, Mode::Normal));
+
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.selected_index(), 1);
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.mode(), Mode::Search);
+        // A plain letter types, even though it's bound...
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.query(), "x");
+        // ...but a ctrl binding runs its command.
+        press(&mut app, KeyCode::Backspace);
+        ctrl(&mut app, 'j');
+        assert_eq!((app.query(), app.selected_index()), ("", 1));
     }
 
     #[test]
