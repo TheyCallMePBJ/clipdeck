@@ -22,6 +22,8 @@ straight through cliphist.
 - **Preview pane**: the full text of the highlighted entry (which
   `cliphist list` cuts off), and image thumbnails via the kitty graphics
   protocol. Thumbnails are cached on disk.
+- **Type filters** (`Tab`): show only text, images or URLs. Works together
+  with search.
 - **Pins** (`p`): keep entries at the top. They survive re-copies, cliphist
   trimming old entries, and `cliphist wipe`.
 - **Delete** (`dd`): press `d` twice so nothing is deleted by accident.
@@ -33,7 +35,6 @@ straight through cliphist.
 
 ## Planned
 
-- Type filters: text, image, URL
 - Paste the entry straight into the previous window via `wtype`
 - Configurable keybinds and colors
 - `--pick` mode: print the selected entry to stdout, for use in scripts
@@ -166,7 +167,7 @@ clipdeck stores no history of its own, only pins.
 - [x] **Live reload**: watching cliphist's database with `notify`.
 - [x] **Pins**: hash-keyed pin store and a pinned section at the top.
 - [ ] **Polish** (in progress): multi-select delete, wipe with confirmation
-  and a help screen are done; type filters, `--pick`, `wtype` paste, and
+  a help screen and type filters are done; `--pick`, `wtype` paste, and
   configurable keybinds and colors are next.
 - [ ] **Release**: README GIF (`vhs`), AUR package, crates.io.
 

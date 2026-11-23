@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 
-use crate::entry::Entry;
+use crate::entry::{Entry, Kind};
 use crate::item::{Item, ItemId};
 use crate::pins::{self, Pins};
 use crate::preview::{Content, Loaded, Request, Source};
@@ -66,6 +66,55 @@ enum Pending {
     Wipe,
 }
 
+/// Which kinds of entries are shown. Cycled with Tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeFilter {
+    All,
+    Text,
+    Images,
+    Urls,
+}
+
+impl TypeFilter {
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Text,
+            Self::Text => Self::Images,
+            Self::Images => Self::Urls,
+            Self::Urls => Self::All,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::All => Self::Urls,
+            Self::Text => Self::All,
+            Self::Images => Self::Text,
+            Self::Urls => Self::Images,
+        }
+    }
+
+    fn accepts(self, kind: &Kind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::All, _)
+                | (Self::Text, Kind::Text)
+                | (Self::Images, Kind::Image { .. })
+                | (Self::Urls, Kind::Url)
+        )
+    }
+
+    /// E.g. "images", for the list title. `None` for `All`.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Text => Some("text"),
+            Self::Images => Some("images"),
+            Self::Urls => Some("URLs"),
+        }
+    }
+}
+
 /// Which keys do what. In `Normal`, letters are commands; in `Search`,
 /// they are typed into the query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +163,7 @@ pub struct App<B: Backend> {
     marked: HashSet<ItemId>,
     /// Whether the help screen is open.
     help: bool,
+    type_filter: TypeFilter,
     /// Loaded previews, most recently loaded first.
     previews: VecDeque<(ItemId, Content)>,
     /// The item whose preview was last requested from the loader.
@@ -144,6 +194,7 @@ impl<B: Backend> App<B> {
             pending: None,
             marked: HashSet::new(),
             help: false,
+            type_filter: TypeFilter::All,
             previews: VecDeque::new(),
             preview_requested: None,
             preview_scroll: None,
@@ -186,6 +237,10 @@ impl<B: Backend> App<B> {
 
     pub fn marked_count(&self) -> usize {
         self.marked.len()
+    }
+
+    pub fn type_filter(&self) -> TypeFilter {
+        self.type_filter
     }
 
     pub fn help_open(&self) -> bool {
@@ -232,6 +287,12 @@ impl<B: Backend> App<B> {
             self.help = false;
             return Action::None;
         }
+        // Tab cycles the type filter in both modes.
+        match key.code {
+            KeyCode::Tab => return self.set_type_filter(self.type_filter.next()),
+            KeyCode::BackTab => return self.set_type_filter(self.type_filter.previous()),
+            _ => {}
+        }
         // Shift+arrows scroll the preview in both modes.
         if key.modifiers.contains(KeyModifiers::SHIFT) {
             match key.code {
@@ -256,12 +317,15 @@ impl<B: Backend> App<B> {
             KeyCode::Char('u') if ctrl => self.move_by(-half_page),
 
             KeyCode::Char('q') => return Action::Quit,
-            // Esc first clears marks, then an active filter, and only quits
-            // after that.
+            // Esc first clears marks, then the search, then the type
+            // filter, and only quits after that.
             KeyCode::Esc if !self.marked.is_empty() => self.marked.clear(),
             KeyCode::Esc if !self.query.is_empty() => {
                 self.query.clear();
                 self.refilter_keeping_selection();
+            }
+            KeyCode::Esc if self.type_filter != TypeFilter::All => {
+                self.set_type_filter(TypeFilter::All);
             }
             KeyCode::Esc => return Action::Quit,
             KeyCode::Char('f') | KeyCode::Char('/') => self.mode = Mode::Search,
@@ -417,6 +481,17 @@ impl<B: Backend> App<B> {
         // fields, accessed directly rather than through methods on `self`.
         let labels = self.items.iter().map(Item::label);
         self.matches = self.searcher.filter(&self.query, labels);
+        // The type filter is applied afterwards, so match indices still
+        // point into `items`.
+        let (items, filter) = (&self.items, self.type_filter);
+        self.matches
+            .retain(|m| filter.accepts(items[m.index].kind()));
+    }
+
+    fn set_type_filter(&mut self, filter: TypeFilter) -> Action {
+        self.type_filter = filter;
+        self.refilter_keeping_selection();
+        Action::None
     }
 
     /// Selects the item with this id if it is shown; otherwise keeps the
@@ -1518,6 +1593,92 @@ mod tests {
         assert_eq!(app.status(), None);
         press(&mut app, KeyCode::Char('d'));
         assert!(matches!(app.status(), Some(Status::Prompt(_))));
+    }
+
+    // --- type filters -------------------------------------------------------
+
+    fn mixed() -> App<Fake> {
+        app_with(&[
+            "notes",
+            "[[ binary data 2 MiB png 2560x1440 ]]",
+            "https://example.com",
+            "more notes",
+        ])
+    }
+
+    fn tab(app: &mut App<Fake>) {
+        press(app, KeyCode::Tab);
+    }
+
+    #[test]
+    fn tab_cycles_through_types() {
+        let mut app = mixed();
+        tab(&mut app);
+        assert_eq!(app.type_filter(), TypeFilter::Text);
+        assert_eq!(shown(&mut app), ["notes", "more notes"]);
+        tab(&mut app);
+        assert_eq!(shown(&mut app), ["[image] png 2560x1440 · 2 MiB"]);
+        tab(&mut app);
+        assert_eq!(shown(&mut app), ["https://example.com"]);
+        tab(&mut app);
+        assert_eq!(app.type_filter(), TypeFilter::All);
+        assert_eq!(app.match_count(), 4);
+    }
+
+    #[test]
+    fn shift_tab_goes_backwards() {
+        let mut app = mixed();
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.type_filter(), TypeFilter::Urls);
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.type_filter(), TypeFilter::Images);
+    }
+
+    #[test]
+    fn type_filter_combines_with_search() {
+        let mut app = mixed();
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "notes");
+        tab(&mut app); // Tab works while searching and isn't typed
+        assert_eq!(app.query(), "notes");
+        assert_eq!(app.mode(), Mode::Search);
+        assert_eq!(app.match_count(), 2);
+        tab(&mut app); // images: none match "notes"
+        assert_eq!(app.match_count(), 0);
+    }
+
+    #[test]
+    fn type_filter_keeps_selection_when_possible() {
+        let mut app = mixed();
+        press(&mut app, KeyCode::End); // "more notes"
+        tab(&mut app); // text
+        assert_eq!(app.selected().unwrap().label(), "more notes");
+    }
+
+    #[test]
+    fn type_filter_applies_to_pins() {
+        let mut app = pinning_app(&["notes", "https://example.com"]);
+        pin_label(&mut app, "https://example.com");
+        tab(&mut app); // text
+        assert_eq!(shown(&mut app), ["notes"]);
+        tab(&mut app);
+        tab(&mut app); // URLs
+        assert_eq!(shown(&mut app), ["*https://example.com"]);
+    }
+
+    #[test]
+    fn esc_clears_search_then_type_filter_then_quits() {
+        let mut app = mixed();
+        tab(&mut app);
+        press(&mut app, KeyCode::Char('f'));
+        type_str(&mut app, "more");
+        press(&mut app, KeyCode::Esc); // leave search mode
+        press(&mut app, KeyCode::Esc); // clear the search
+        assert_eq!(app.query(), "");
+        assert_eq!(app.type_filter(), TypeFilter::Text);
+        assert_eq!(press(&mut app, KeyCode::Esc), Action::None);
+        assert_eq!(app.type_filter(), TypeFilter::All);
+        assert_eq!(press(&mut app, KeyCode::Esc), Action::Quit);
     }
 
     // --- previews ---------------------------------------------------------

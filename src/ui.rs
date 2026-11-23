@@ -56,12 +56,14 @@ const HELP: &[Option<(&str, &str)>] = &[
     Some(("dd", "delete (the marked entries, if any)")),
     Some(("WW", "wipe history (pins are kept)")),
     Some(("r", "reload")),
-    Some(("Esc", "clear marks, then filter, then quit")),
+    Some(("Tab  Shift+Tab", "show all / text / images / URLs")),
+    Some(("Esc", "clear marks, search, type; then quit")),
     Some(("q  Ctrl+c", "quit")),
     None,
     Some(("typing", "filter: 'exact ^prefix suffix$ !not")),
     Some(("↑/↓  Ctrl+n/p", "move")),
     Some(("Ctrl+w/u", "delete word / clear")),
+    Some(("Tab  Shift+Tab", "show all / text / images / URLs")),
     Some(("Enter", "copy and close")),
     Some(("Esc", "back to the list, keeping the filter")),
 ];
@@ -97,13 +99,18 @@ fn draw_help(frame: &mut Frame) {
 fn draw_list<B: Backend>(frame: &mut Frame, app: &mut App<B>, list_area: Rect) {
     // The border takes one row at the top and one at the bottom.
     app.set_page_height(list_area.height.saturating_sub(2) as usize);
-    let block = Block::bordered().title(" clipdeck ");
+    let type_label = app.type_filter().label();
+    let title = match type_label {
+        Some(label) => format!(" clipdeck · {label} "),
+        None => " clipdeck ".to_owned(),
+    };
+    let block = Block::bordered().title(title);
 
     if app.match_count() == 0 {
-        let message = if app.items().is_empty() {
-            "clipboard history is empty"
-        } else {
-            "no matches"
+        let message = match (type_label, app.query().is_empty()) {
+            _ if app.items().is_empty() => "clipboard history is empty".to_owned(),
+            (Some(label), true) => format!("no {label}"),
+            _ => "no matches".to_owned(),
         };
         frame.render_widget(Paragraph::new(message.dim()).block(block), list_area);
     } else {
@@ -488,6 +495,28 @@ mod tests {
         assert!(screen.contains(" keys "), "{screen}");
         assert!(screen.contains("wipe history (pins are kept)"), "{screen}");
         assert!(screen.contains("press any key to close"), "{screen}");
+    }
+
+    #[test]
+    fn type_filter_shows_in_title() {
+        let mut app = app();
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        app.handle_key(KeyEvent::from(KeyCode::Tab)); // images
+        let screen = render(&mut app);
+        assert!(screen.contains("clipdeck · images"), "{screen}");
+        assert!(screen.contains("1/1 of 3"), "{screen}");
+        app.handle_key(KeyEvent::from(KeyCode::Tab)); // URLs
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(render(&mut app).contains("no matches"));
+    }
+
+    #[test]
+    fn empty_type_says_what_is_missing() {
+        let mut app = App::new(Fixed(vec![Entry::parse("1\tjust text").unwrap()]), None).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        app.handle_key(KeyEvent::from(KeyCode::Tab)); // images
+        assert!(render(&mut app).contains("no images"));
     }
 
     #[test]
