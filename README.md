@@ -58,11 +58,13 @@ straight through cliphist.
 
 ## Install
 
-**Arch Linux** ([AUR](https://aur.archlinux.org/packages/clipdeck)), with
-your AUR helper:
+**Arch Linux:** an AUR package is coming. Until then, build the package
+from the repository's PKGBUILD:
 
 ```bash
-paru -S clipdeck    # or: yay -S clipdeck
+git clone https://github.com/TheyCallMePBJ/clipdeck
+cd clipdeck/packaging/aur
+makepkg -si
 ```
 
 This also installs `cliphist` and `wl-clipboard`, and puts `clipdeck` in
@@ -237,8 +239,9 @@ clipdeck stores no history of its own, only pins.
 - [x] **Polish**: multi-select delete, wipe with confirmation, a help
   screen, type filters, `--pick`, `--paste`, and configurable keybinds and
   colors.
-- [x] **Release**: 0.1.0, with a README GIF (`vhs`), an AUR package and
-  crates.io.
+- [ ] **Release** (in progress): 0.1.0 is out on crates.io and GitHub, with
+  a README GIF (`vhs`). The AUR package is ready and waits for AUR account
+  registration to reopen.
 
 ## Non-goals
 

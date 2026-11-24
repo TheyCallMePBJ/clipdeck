@@ -11,7 +11,7 @@ depends=('cliphist' 'wl-clipboard' 'gcc-libs' 'glibc')
 makedepends=('cargo')
 optdepends=('wtype: paste into the previous window with --paste')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('c914dfb1f3b6001a2dcbb091fc370749284cdd7039ec1f8b5df4c807430d162f')
 
 prepare() {
   cd "$pkgname-$pkgver"
