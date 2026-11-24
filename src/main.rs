@@ -133,6 +133,7 @@ fn main() -> Result<ExitCode> {
         },
         None => (config::Config::default(), None),
     };
+    let image_protocol = config.image_protocol;
     let mut app = App::new(cliphist.clone(), pins)?;
     app.set_config(config);
     // The config error wins if there are both: it's the one just made.
@@ -156,7 +157,12 @@ fn main() -> Result<ExitCode> {
     // the terminal, so it must happen before the input thread starts.
     // Terminals without a graphics protocol get images drawn with
     // half-block characters instead.
-    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    // The query also finds the font size, which images need for scaling,
+    // so it runs even when the config names a protocol.
+    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    if let Some(protocol) = image_protocol {
+        picker.set_protocol_type(protocol);
+    }
     let protocol = picker.protocol_type();
     let queried = start.elapsed();
 

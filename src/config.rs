@@ -9,8 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui_image::picker::ProtocolType;
 use serde::Deserialize;
 
 use crate::keys::Keymap;
@@ -71,12 +72,20 @@ error = "red"
 # The selected row is drawn in reverse video unless you set these:
 # selected_fg = "black"
 # selected_bg = "yellow"
+
+[preview]
+# How images are drawn: "auto" (ask the terminal), "kitty", "sixel",
+# "iterm2", or "halfblocks" (colored block characters, works anywhere).
+# Set this if images don't show up although your terminal supports them.
+image_protocol = "auto"
 "##;
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub keymap: Keymap,
     pub theme: Theme,
+    /// `None` means detect it by asking the terminal.
+    pub image_protocol: Option<ProtocolType>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -133,6 +142,14 @@ struct File {
     keys: BTreeMap<String, OneOrMany>,
     #[serde(default)]
     colors: Colors,
+    #[serde(default)]
+    preview: Preview,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Preview {
+    image_protocol: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -184,6 +201,14 @@ impl Config {
     fn parse(defaults: &str, user: &str) -> Result<Self> {
         let defaults: File = toml::from_str(defaults).context("bad default config")?;
         let user: File = toml::from_str(user)?;
+        let protocol = user
+            .preview
+            .image_protocol
+            .as_deref()
+            .or(defaults.preview.image_protocol.as_deref())
+            .map(parse_protocol)
+            .transpose()?
+            .flatten();
 
         let split = |file: File| -> (Vec<(String, Vec<String>)>, Colors) {
             let keys = file
@@ -220,12 +245,31 @@ impl Config {
             selected_fg: pick(u.selected_fg, d.selected_fg, "selected_fg")?,
             selected_bg: pick(u.selected_bg, d.selected_bg, "selected_bg")?,
         };
-        Ok(Self { keymap, theme })
+        Ok(Self {
+            keymap,
+            theme,
+            image_protocol: protocol,
+        })
     }
 }
 
 fn parse_color(text: &str, name: &str) -> Result<Color> {
     Color::from_str(text).map_err(|_| anyhow::anyhow!("colors.{name}: unknown color {text:?}"))
+}
+
+/// `None` for "auto".
+fn parse_protocol(text: &str) -> Result<Option<ProtocolType>> {
+    Ok(match text.to_ascii_lowercase().as_str() {
+        "auto" => None,
+        "kitty" => Some(ProtocolType::Kitty),
+        "sixel" => Some(ProtocolType::Sixel),
+        "iterm2" => Some(ProtocolType::Iterm2),
+        "halfblocks" => Some(ProtocolType::Halfblocks),
+        _ => bail!(
+            "preview.image_protocol: unknown protocol {text:?} \
+             (use auto, kitty, sixel, iterm2 or halfblocks)"
+        ),
+    })
 }
 
 /// `~/.config/clipdeck/config.toml` (respecting `XDG_CONFIG_HOME`).
@@ -305,6 +349,14 @@ pub mod tests {
         );
         assert!(user("[keys]\npin = \"hyper+p\"").is_err());
         assert!(user("[keys]\npin = 3").is_err());
+    }
+
+    #[test]
+    fn image_protocol() {
+        assert_eq!(user("").unwrap().image_protocol, None);
+        let config = user("[preview]\nimage_protocol = \"halfblocks\"").unwrap();
+        assert_eq!(config.image_protocol, Some(ProtocolType::Halfblocks));
+        assert!(user("[preview]\nimage_protocol = \"png\"").is_err());
     }
 
     #[test]

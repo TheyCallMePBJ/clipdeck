@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "Terminal-styled clipboard history manager for Wayland, built on cliphist"
 license = "MIT"
+repository = "https://github.com/TheyCallMePBJ/clipdeck"
+readme = "README.md"
+keywords = ["clipboard", "wayland", "cliphist", "tui", "ratatui"]
+categories = ["command-line-utilities"]
+# Only what's needed to build; the demo GIF and packaging stay on GitHub.
+include = ["/src", "/LICENSE", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
 anyhow = "1.0.104"

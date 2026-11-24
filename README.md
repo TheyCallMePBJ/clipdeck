@@ -5,6 +5,13 @@ A terminal-styled clipboard history manager for Wayland, built on top of
 (a TUI running in a terminal window), lets you fuzzy-search your history with
 text and image previews, and keeps everything in sync with cliphist.
 
+![clipdeck: browsing history, searching, filtering by type, pinning and the help screen](demo/clipdeck.gif)
+
+<sub>Recorded with [vhs](https://github.com/charmbracelet/vhs), whose
+terminal can't show kitty or sixel graphics, so the image preview is drawn
+with block characters. In Ghostty, kitty or WezTerm it's a sharp
+thumbnail.</sub>
+
 ## Why
 
 Some launcher clipboard integrations keep their own copy of the history, so
@@ -51,16 +58,34 @@ straight through cliphist.
 
 ## Install
 
+**Arch Linux** ([AUR](https://aur.archlinux.org/packages/clipdeck)), with
+your AUR helper:
+
+```bash
+paru -S clipdeck    # or: yay -S clipdeck
+```
+
+This also installs `cliphist` and `wl-clipboard`, and puts `clipdeck` in
+`/usr/bin`.
+
+**With cargo**, from [crates.io](https://crates.io/crates/clipdeck):
+
+```bash
+cargo install clipdeck
+```
+
+**From source:**
+
 ```bash
 git clone https://github.com/TheyCallMePBJ/clipdeck
 cd clipdeck
 cargo install --path .
 ```
 
-This builds clipdeck and puts the binary in `~/.cargo/bin/clipdeck`. To
-update later, `git pull` and run `cargo install --path .` again.
+Both cargo methods put the binary in `~/.cargo/bin/clipdeck`; install
+`cliphist` and `wl-clipboard` yourself.
 
-> **PATH note:** `~/.cargo/bin` is often added to `PATH` only by your shell's
+> **PATH note (cargo installs):** `~/.cargo/bin` is often added to `PATH` only by your shell's
 > config, which your compositor doesn't read. If a keybind reports that
 > `clipdeck` can't be found, use the full path in the bind
 > (`ghostty --title=clipdeck -e /home/you/.cargo/bin/clipdeck`) or add
@@ -137,6 +162,14 @@ away from the command that had it by default. If the file has a mistake
 the status bar and runs with the defaults. `--config PATH` reads a different
 file.
 
+If image previews stay blank although your terminal supports images, its
+protocol was probably detected wrongly. Set it yourself:
+
+```toml
+[preview]
+image_protocol = "kitty"     # or "sixel", "iterm2", "halfblocks"
+```
+
 ## Design
 
 ### cliphist is the source of truth
@@ -204,7 +237,8 @@ clipdeck stores no history of its own, only pins.
 - [x] **Polish**: multi-select delete, wipe with confirmation, a help
   screen, type filters, `--pick`, `--paste`, and configurable keybinds and
   colors.
-- [ ] **Release**: README GIF (`vhs`), AUR package, crates.io.
+- [x] **Release**: 0.1.0, with a README GIF (`vhs`), an AUR package and
+  crates.io.
 
 ## Non-goals
 
